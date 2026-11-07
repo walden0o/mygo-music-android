@@ -1,0 +1,13 @@
+{
+  "id": "kugou",
+  "name": "酷狗",
+  "version": "1.0.0",
+  "main": "index.js",
+  "playback": "stream",
+  "permissions": { "network": ["gateway.kugou.com", "lyrics.kugou.com", "krcs.kugou.com", "login-user.kugou.com", "expendablekmr.kugou.com", "openapi.kugou.com"] },
+  "navigation": [
+    { "builtin": "home" },
+    { "title": "每日推荐", "page": "daily", "icon": "calendar" },
+    { "title": "歌手", "page": "artists", "icon": "artist" }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "id": "bilibili",
+  "name": "Bilibili",
+  "version": "0.3.1",
+  "minAppVersion": "0.1.21",
+  "main": "index.js",
+  "playback": "stream",
+  "permissions": {
+    "network": [
+      "api.bilibili.com",
+      "passport.bilibili.com",
+      "s.search.bilibili.com",
+      "b23.tv",
+      "*.hdslb.com",
+      "aisubtitle.hdslb.com"
+    ],
+    "process": [
+      "ffmpeg",
+      "/opt/homebrew/bin/ffmpeg",
+      "/usr/local/bin/ffmpeg"
+    ]
+  },
+  "navigation": [
+    {
+      "builtin": "home"
+    },
+    {
+      "title": "Charts",
+      "page": "charts",
+      "icon": "chart"
+    },
+    {
+      "title": "Favorites",
+      "builtin": "liked"
+    },
+    {
+      "builtin": "stations"
+    }
+  ]
+}

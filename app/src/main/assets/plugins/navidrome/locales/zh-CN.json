@@ -1,0 +1,17 @@
+{
+  "Server URL": "服务器地址",
+  "For example https://music.example.com; subpaths are supported": "例如 https://music.example.com，支持子路径",
+  "Username": "用户名",
+  "Password": "密码",
+  "Your Navidrome password; use HTTPS": "Navidrome 账号密码；请使用 HTTPS",
+  "External lyrics": "外部歌词",
+  "Uses Better Lyrics when the server has no lyrics; enter off to disable": "服务器没有歌词时使用 Better Lyrics；输入 off 可关闭",
+  "Discover": "发现音乐",
+  "Albums": "专辑",
+  "Artists": "艺人",
+  "Genres": "流派",
+  "Favorite albums": "我喜欢的专辑",
+  "Favorite artists": "我喜欢的艺人",
+  "Favorite songs": "我喜欢的音乐",
+  "Radio": "电台"
+}

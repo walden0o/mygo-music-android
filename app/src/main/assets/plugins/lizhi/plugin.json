@@ -1,0 +1,18 @@
+{
+  "id": "lizhi",
+  "name": "Li Zhi",
+  "version": "1.1.0",
+  "minAppVersion": "0.1.8",
+  "main": "index.js",
+  "playback": "stream",
+  "permissions": {
+    "network": ["api.github.com", "testingcf.jsdelivr.net", "cdn.jsdelivr.net", "raw.githubusercontent.com", "lrclib.net"]
+  },
+  "navigation": [
+    { "builtin": "home" },
+    { "title": "Albums", "page": "albums", "icon": "album" },
+    { "title": "All Songs", "page": "all", "icon": "note" },
+    { "builtin": "liked" },
+    { "builtin": "stations" }
+  ]
+}

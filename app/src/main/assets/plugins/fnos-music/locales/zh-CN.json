@@ -1,0 +1,23 @@
+{
+  "fnOS Music": "飞牛音乐",
+  "Recently Added": "最近添加",
+  "Albums": "专辑",
+  "Artists": "艺术家",
+  "Playlists": "播放列表",
+  "Songs": "歌曲",
+  "All Songs": "全部歌曲",
+  "All Albums": "全部专辑",
+  "All Artists": "全部艺术家",
+  "My Playlists": "我的播放列表",
+  "Recently Played": "最近播放",
+  "No albums": "还没有专辑",
+  "No artists": "还没有艺术家",
+  "No playlists yet": "还没有播放列表",
+  "Server": "服务器",
+  "Username": "用户名",
+  "Password": "密码",
+  "Your fnOS Music address, such as https://fnos.example.com (without /music/login).": "飞牛音乐的地址，例如 https://fnos.example.com（不需要 /music/login）。",
+  "Your fnOS Music username.": "飞牛音乐的用户名。",
+  "Your fnOS Music password. It is kept by MyGo Music and only sent to the server you set.": "飞牛音乐的密码，由 MyGo Music 保存，只会发送到你设置的服务器。",
+  "Enter the fnOS Music server address in the plugin settings.": "请先在插件设置中填写飞牛音乐服务器地址。"
+}

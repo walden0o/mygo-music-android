@@ -1,0 +1,22 @@
+# Build outputs
+.gradle/
+.kotlin/
+build/
+app/build/
+harness/build/
+harness/.gradle/
+
+# Local machine config
+local.properties
+
+# Upstream reference sources (not part of this project; see README)
+ref-src/
+plugins-src/
+
+# Harness runtime state
+harness/storage.json
+
+# IDE / OS
+.idea/
+*.iml
+.DS_Store

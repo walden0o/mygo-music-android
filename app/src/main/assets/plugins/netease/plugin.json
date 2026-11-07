@@ -1,0 +1,26 @@
+{
+  "id": "netease",
+  "name": "网易云音乐",
+  "version": "1.0.0",
+  "main": "index.js",
+  "playback": "stream",
+  "permissions": {
+    "network": ["music.163.com", "interface.music.163.com"]
+  },
+  "settings": [
+    {
+      "key": "loginMethod",
+      "label": "登录方式",
+      "help": "留空或填 qr 使用网易云 App 扫码；填 web 使用网易云网页登录窗口。"
+    }
+  ],
+  "navigation": [
+    { "title": "发现音乐", "builtin": "home" },
+    { "title": "每日推荐", "page": "daily", "icon": "calendar" },
+    { "title": "排行榜", "page": "charts", "icon": "chart" },
+    { "title": "喜欢的音乐", "builtin": "liked" },
+    { "title": "收藏专辑", "builtin": "savedAlbums" },
+    { "title": "私人 FM", "builtin": "stations" },
+    { "title": "我的播客", "builtin": "shows" }
+  ]
+}

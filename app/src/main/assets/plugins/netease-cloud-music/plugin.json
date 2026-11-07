@@ -1,0 +1,53 @@
+{
+  "id": "netease-cloud-music",
+  "name": "NetEase Cloud Music",
+  "version": "0.1.8",
+  "minAppVersion": "0.1.19",
+  "main": "index.js",
+  "playback": "stream",
+  "permissions": {
+    "network": [
+      "music.163.com",
+      "interfacepc.music.163.com"
+    ]
+  },
+  "settings": [
+    {
+      "key": "quality",
+      "label": "Quality Override",
+      "help": "Leave empty to follow the player. Options: standard / higher / exhigh / lossless / hires. Your account must have access to the requested quality."
+    },
+    {
+      "key": "loginMethod",
+      "label": "Sign-in Method",
+      "help": "Leave empty or use qr for QR sign-in; use web for website sign-in. Sessions are stored in the host's plugin data files, not the system keychain."
+    }
+  ],
+  "navigation": [
+    {
+      "title": "For You",
+      "builtin": "home",
+      "icon": "home"
+    },
+    {
+      "title": "Daily Recommendations",
+      "page": "daily",
+      "icon": "calendar"
+    },
+    {
+      "title": "Personal FM",
+      "builtin": "stations",
+      "icon": "radio"
+    },
+    {
+      "title": "Charts",
+      "page": "charts",
+      "icon": "chart"
+    },
+    {
+      "title": "Podcasts",
+      "page": "podcasts",
+      "icon": "podcast"
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+{
+  "id": "download-music",
+  "name": "Music Download",
+  "version": "0.2.0",
+  "minAppVersion": "0.1.8",
+  "main": "index.js",
+  "playback": "stream",
+  "permissions": {
+    "network": [
+      "flac.music.hi.cn",
+      "*.music.126.net",
+      "*.126.net",
+      "music.163.com",
+      "*.kuwo.cn",
+      "kuwo.cn",
+      "www.kuwo.cn",
+      "api.bilibili.com",
+      "www.bilibili.com",
+      "*.bilibili.com",
+      "*.hdslb.com",
+      "*.bilivideo.com",
+      "*.bilivideo.cn",
+      "*.szbdyd.com",
+      "*.biliapi.net",
+      "localhost",
+      "127.0.0.1",
+      "*.local",
+      "*"
+    ]
+  },
+  "settings": [
+    {
+      "key": "platform",
+      "label": "Search source (all / wyy / kuwo / bili …)",
+      "help": "未配置后端时：all=网易云+酷我；wyy=网易云；kuwo=酷我；bili=B站。配置后端(backend)后，这里填后端源，可写多个用逗号分隔：netease/wyy、kuwo、kugou、migu、soda(汽水)、qq、bilibili/bili、joox、qianqian、apple；all=常用六站。留空=网易云+酷我。",
+      "link": "https://flac.music.hi.cn/"
+    },
+    {
+      "key": "quality",
+      "label": "Download quality (lossless / high / standard)",
+      "help": "覆盖本插件的播放/下载音质；留空跟随 App。lossless=FLAC、high=MP3 320、standard=MP3 128（内置源按此选音源；后端源返回其提供的最佳音质，如咪咕为无损 FLAC）。"
+    },
+    {
+      "key": "backend",
+      "label": "自建下载后端地址 (go-music-dl，可选)",
+      "help": "留空=用内置免费源(网易云/酷我/B站)。填写 go-music-dl 地址(如 http://127.0.0.1:8080，会自动补 /music)后，搜索/下载/歌词改走该后端，可支持 QQ、汽水音乐、咪咕、酷狗、网易云、酷我、B站 等更多来源。后端需自行运行：go-music-dl web --port 8080 --no-browser（AGPL-3，独立服务，插件只经 HTTP 调用）。QQ/酷狗部分内容可能需在后端配置 Cookie。"
+    }
+  ],
+  "navigation": [
+    { "title": "Charts", "page": "charts", "icon": "star" }
+  ]
+}

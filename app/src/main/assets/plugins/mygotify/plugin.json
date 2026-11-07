@@ -1,0 +1,65 @@
+{
+  "id": "mygotify",
+  "name": "MyGotify",
+  "version": "0.1.0",
+  "minAppVersion": "0.1.8",
+  "main": "index.js",
+  "playback": "stream",
+  "permissions": {
+    "network": [
+      "open.spotify.com",
+      "api-partner.spotify.com",
+      "spclient.wg.spotify.com",
+      "clienttoken.spotify.com",
+      "gist.githubusercontent.com",
+      "music.youtube.com",
+      "lrclib.net",
+      "music.163.com"
+    ],
+    "process": [
+      "ffmpeg",
+      "yt-dlp",
+      "/opt/homebrew/bin/ffmpeg",
+      "/opt/homebrew/bin/yt-dlp",
+      "/usr/local/bin/ffmpeg",
+      "/usr/local/bin/yt-dlp"
+    ]
+  },
+  "settings": [
+    {
+      "key": "spDc",
+      "label": "sp_dc cookie",
+      "help": "Sign in at open.spotify.com in your browser, then copy the sp_dc cookie from its developer tools (Storage > Cookies). Needed on Linux, optional elsewhere.",
+      "link": "https://open.spotify.com"
+    }
+  ],
+  "navigation": [
+    {
+      "builtin": "home"
+    },
+    {
+      "title": "Made For You",
+      "page": "madeForYou",
+      "icon": "star"
+    },
+    {
+      "title": "Recently Played",
+      "page": "recent",
+      "icon": "calendar"
+    },
+    {
+      "builtin": "stations"
+    },
+    {
+      "title": "Artists",
+      "page": "artists",
+      "icon": "artist"
+    },
+    {
+      "builtin": "liked"
+    },
+    {
+      "builtin": "savedAlbums"
+    }
+  ]
+}

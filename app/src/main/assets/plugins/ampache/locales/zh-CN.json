@@ -1,0 +1,19 @@
+{
+  "Ampache": "Ampache",
+  "Server URL": "服务器 URL",
+  "Username": "用户名",
+  "Password": "密码",
+  "Songs": "音乐",
+  "Albums": "专辑",
+  "Artists": "歌手",
+  "Set the Ampache URL, username and API password first": "先设置服务器地址，用户名和密码以开始",
+  "Invalid Ampache URL": "无效的 Ampache 地址",
+  "Use an HTTP or HTTPS URL without embedded credentials": "选择不内嵌密钥而访问 HTTP 或 HTTPS 的服务器地址",
+  "Enter the full Ampache API URL, ending in /server/xml.server.php": "输入完整的 Ampache API地址，需要以 /server/xml.server.php 结尾",
+  "Ampache returned invalid JSON. Check the API URL.": "你的服务器返回了无效的JSON格式，请确认你的地址是否正确",
+  "Ampache did not return a session": "Ampache 服务器没有返回有效的登录",
+  "Settings changed during sign-in": "设置在登录期间变更了",
+  "Ampache list exceeded 100000 entries": "Ampache 有超过 100000 个项目",
+  "Ampache returned no audio URL": "Ampache 服务器没有返回音频地址",
+  "Unsupported audio URL": "不支持的音频地址"
+}

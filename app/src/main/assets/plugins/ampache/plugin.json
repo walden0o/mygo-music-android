@@ -1,0 +1,15 @@
+{
+  "id": "ampache",
+  "name": "Ampache",
+  "version": "0.1.0",
+  "minAppVersion": "0.1.8",
+  "main": "index.js",
+  "playback": "stream",
+  "permissions": { "network": ["*"] },
+  "settings": [
+    { "key": "server", "label": "Server URL" },
+    { "key": "username", "label": "Username" },
+   { "key": "password", "label": "Password" }
+  ],
+  "navigation": [{ "builtin": "home" }]
+}

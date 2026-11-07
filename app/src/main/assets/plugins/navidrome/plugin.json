@@ -1,0 +1,25 @@
+{
+  "id": "navidrome",
+  "name": "Navidrome",
+  "version": "0.2.0",
+  "minAppVersion": "0.1.8",
+  "main": "index.js",
+  "playback": "stream",
+  "permissions": { "network": ["*"] },
+  "settings": [
+    { "key": "server", "label": "Server URL", "help": "For example https://music.example.com; subpaths are supported" },
+    { "key": "username", "label": "Username" },
+    { "key": "password", "label": "Password", "help": "Your Navidrome password; use HTTPS" },
+    { "key": "betterLyrics", "label": "External lyrics", "help": "Uses Better Lyrics when the server has no lyrics; enter off to disable" }
+  ],
+  "navigation": [
+    { "title": "Discover", "builtin": "home" },
+    { "title": "Albums", "page": "albums", "icon": "album" },
+    { "title": "Artists", "page": "artists", "icon": "artist" },
+    { "title": "Genres", "page": "genres", "icon": "note" },
+    { "title": "Favorite albums", "builtin": "savedAlbums" },
+    { "title": "Favorite artists", "page": "liked-artists", "icon": "star" },
+    { "title": "Favorite songs", "builtin": "liked" },
+    { "title": "Radio", "builtin": "stations" }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "Music Download": "音乐下载",
+  "Search in the search bar · download FLAC lossless": "在搜索框输入歌名 · 下载无损 FLAC",
+  "Charts": "热门榜单",
+  "NetEase Cloud Music": "网易云音乐",
+  "How to download": "如何下载",
+  "Type a song name in the search bar to search": "在搜索框输入歌名即可搜索",
+  "Choose the source in Settings": "可在设置里切换搜索来源",
+  "Songs": "歌曲",
+  "Playlist": "歌单",
+  "My Playlists": "我的歌单",
+  "New Playlist": "新歌单",
+  "Bilibili": "哔哩哔哩",
+  "Music Ranking": "音乐排行榜",
+  "Search source (all / wyy / kuwo / bili)": "搜索来源 (all / wyy / kuwo / bili)",
+  "all = 网易云+酷我；wyy = 网易云音乐；kuwo = 酷我音乐；bili = B站(哔哩哔哩)。留空默认 all。B站走官方音轨，最高 192k（部分内容为 Hi-Res）。": "all = 网易云+酷我；wyy = 网易云音乐；kuwo = 酷我音乐；bili = B站(哔哩哔哩)。留空默认 all。B站走官方音轨，最高 192k（部分内容为 Hi-Res）。",
+  "Download quality (lossless / high / standard)": "下载音质 (lossless / high / standard)",
+  "Overrides the app's playback quality for this plugin. Leave empty to follow the app setting. lossless = FLAC, high = MP3 320, standard = MP3 128. B站按档位映射到最高可用音轨。": "覆盖 App 的播放音质（仅本插件）。留空则跟随 App 设置。lossless=无损 FLAC，high=MP3 320，standard=MP3 128。B站按档位映射到最高可用音轨。",
+  "Help": "使用说明",
+  "Type a song name in the search bar to search. Set the source (all / wyy / kuwo / bili) and an optional download quality under Settings → Plugins. bili downloads the official Bilibili audio track (up to 192k).": "在搜索框输入歌名即可搜索。可在「设置 → 插件」里切换来源（all / wyy / kuwo / bili）并设置下载音质；选 bili 走 B站官方音轨（最高 192k）。"
+}
