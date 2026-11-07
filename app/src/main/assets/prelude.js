@@ -258,15 +258,18 @@ globalThis.host = {
 };
 
 // ---- call driver: Kotlin invokes __invoke, result arrives via _deliver ----------------
-globalThis.__invoke = function (name, argsJson) {
+// The id is echoed back so the host can route each result to its own caller.
+// Without it, concurrent calls shared one delivery slot and stole each other's
+// results (see BUGS.md C1).
+globalThis.__invoke = function (name, argsJson, callId) {
   (async function () {
     try {
       const fn = __exports[name];
       if (typeof fn !== "function") throw new Error("plugin has no export " + name);
       const v = await fn(JSON.parse(argsJson));
-      _deliver(JSON.stringify({ ok: true, valueJson: JSON.stringify(v === undefined ? null : v) }));
+      _deliver(callId, JSON.stringify({ ok: true, valueJson: JSON.stringify(v === undefined ? null : v) }));
     } catch (e) {
-      _deliver(JSON.stringify({
+      _deliver(callId, JSON.stringify({
         ok: false,
         error: String((e && e.message) || e),
         code: (e && e.code) || null,

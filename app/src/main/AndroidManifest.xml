@@ -4,6 +4,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- M9: ExoPlayer WAKE_MODE_NETWORK holds a partial Wi-Fi lock while streaming screen-off. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <application
         android:label="MyGo Music"
@@ -11,10 +13,16 @@
         android:roundIcon="@mipmap/ic_launcher"
         android:supportsRtl="true"
         android:theme="@style/Theme.MyGoMusic"
+        android:allowBackup="false"
         android:usesCleartextTraffic="true">
+        <!-- M13: allowBackup=false keeps plugin cookies/tokens (filesDir + SharedPreferences)
+             out of cloud backup / device transfer. -->
         <activity
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:launchMode="singleTop">
+            <!-- L16b: singleTop + the PendingIntent's CLEAR_TOP/SINGLE_TOP flags stop a
+                 duplicate MainActivity from stacking when the notification is tapped. -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -26,8 +34,18 @@
             android:foregroundServiceType="mediaPlayback">
             <intent-filter>
                 <action android:name="androidx.media3.session.MediaSessionService" />
-                <action android:name="android.media.session.MediaButtonReceiver" />
             </intent-filter>
         </service>
+        <!-- M8: Android 8-11 headset/Bluetooth media keys need a real BroadcastReceiver.
+             A <service> cannot receive broadcasts; the old android.media.session.MediaButtonReceiver
+             action on the service was bogus. androidx.media3.session.MediaButtonReceiver exists in
+             Media3 1.4.1 (verified via javap on the cached AAR) and forwards the key to the session. -->
+        <receiver
+            android:name="androidx.media3.session.MediaButtonReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MEDIA_BUTTON" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

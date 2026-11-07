@@ -1,6 +1,8 @@
 package dev.walden.mygomusic.ui.sheets
 
+import android.content.Intent
 import android.os.Build
+import android.provider.Settings
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -21,9 +23,9 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.Logout
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
-import androidx.compose.material.icons.rounded.Logout
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.Button
@@ -47,6 +49,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -200,6 +203,32 @@ fun SettingsSheet(state: MyGoState) {
             color = LocalMyGoExtras.current.hairline,
             modifier = Modifier.padding(horizontal = 24.dp, vertical = 6.dp),
         )
+        // L16a: after POST_NOTIFICATIONS is denied, offer a recovery entry that
+        // opens the app's notification settings instead of nagging on launch.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && state.notificationPermissionDenied) {
+            val context = LocalContext.current
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                            .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                        runCatching { context.startActivity(intent) }
+                            .onFailure { state.toast("无法打开系统设置") }
+                    }
+                    .padding(horizontal = 24.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("通知权限已关闭 · 去设置", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "开启后才能显示播放通知",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
         Row(
             Modifier
                 .fillMaxWidth()
@@ -272,7 +301,7 @@ fun AccountSheet(state: MyGoState) {
             Spacer(Modifier.height(20.dp))
             if (state.can("signOut")) {
                 TextButton(onClick = { state.signOut() }) {
-                    Icon(Icons.Rounded.Logout, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Icon(Icons.AutoMirrored.Rounded.Logout, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))
                     Text("退出登录")
                 }

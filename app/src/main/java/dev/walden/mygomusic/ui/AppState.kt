@@ -30,6 +30,7 @@ import dev.walden.mygomusic.TrackPage
 import dev.walden.mygomusic.pluginJson
 import dev.walden.mygomusic.ui.theme.ThemeMode
 import dev.walden.mygomusic.util.qrBitmap
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -37,6 +38,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.DeserializationStrategy
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.JsonElement
@@ -46,6 +49,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
@@ -159,6 +163,27 @@ class MyGoState private constructor(private val app: Context) {
 
     private var runtime: PluginRuntime? = null
 
+    /**
+     * Bumped whenever the active plugin changes. Every loader captures the
+     * generation it started under and drops its result if it moved on, so a
+     * slow answer from the old plugin can never land in the new session
+     * (BUGS.md M18). Main-thread confined, like the rest of the state.
+     */
+    private var generation = 0
+
+    /** In-flight page loaders, cancelled wholesale on plugin switch. */
+    private val loaderJobs = mutableSetOf<Job>()
+
+    /** The in-flight plugin activation, so a newer switch supersedes it. */
+    private var activateJob: Job? = null
+
+    private fun launchLoader(block: suspend CoroutineScope.() -> Unit): Job {
+        val job = scope.launch(block = block)
+        loaderJobs += job
+        job.invokeOnCompletion { loaderJobs -= job }
+        return job
+    }
+
     /** Plugins that work out of the box come first in the switcher. */
     private fun preferredRank(id: String): Int {
         val order = listOf(
@@ -179,6 +204,26 @@ class MyGoState private constructor(private val app: Context) {
         private set
     var dynamicColor by mutableStateOf(prefs.getBoolean("dynamicColor", false))
         private set
+
+    /**
+     * POST_NOTIFICATIONS was denied at least once. Persisted so we ask only
+     * once ever; the Settings sheet offers a recovery entry instead of nagging
+     * on every launch (BUGS.md L16a).
+     */
+    var notificationPermissionDenied by mutableStateOf(prefs.getBoolean("notificationDenied", false))
+        private set
+
+    fun markNotificationPermissionDenied() {
+        notificationPermissionDenied = true
+        prefs.edit().putBoolean("notificationDenied", true).apply()
+    }
+
+    /** Called when the permission is observed granted (e.g. via system settings). */
+    fun clearNotificationPermissionDenied() {
+        if (!notificationPermissionDenied) return
+        notificationPermissionDenied = false
+        prefs.edit().remove("notificationDenied").apply()
+    }
 
     var catalog by mutableStateOf<List<PluginManifest>>(emptyList())
         private set
@@ -218,6 +263,8 @@ class MyGoState private constructor(private val app: Context) {
     var liked by mutableStateOf<Load<TrackPage>>(Load.Idle)
         private set
     var likedLoadingMore by mutableStateOf(false)
+        private set
+    var showLoadingMore by mutableStateOf(false)
         private set
     var recent by mutableStateOf<Load<List<Track>>>(Load.Idle)
         private set
@@ -277,6 +324,20 @@ class MyGoState private constructor(private val app: Context) {
             sheet = null
             return
         }
+        // M18: a new session begins. Invalidate every in-flight coroutine from
+        // the old plugin so its late results can't be written into this one.
+        generation++
+        searchJob?.cancel()
+        suggestJob?.cancel()
+        dismissSignIn()
+        activateJob?.cancel()
+        loaderJobs.toList().forEach { it.cancel() }
+        loaderJobs.clear()
+        likedLoadingMore = false
+        showLoadingMore = false
+        searchLoadingMore = false
+        currentLiked = false
+        lastSeenTrackId = null
         pluginReady = false
         pluginError = null
         account = null
@@ -299,7 +360,9 @@ class MyGoState private constructor(private val app: Context) {
         sheet = null
         lyrics = Load.Idle
 
-        scope.launch {
+        val gen = generation
+        activateJob = scope.launch {
+            var rt: PluginRuntime? = null
             try {
                 val source = withContext(Dispatchers.IO) {
                     val code = try {
@@ -315,8 +378,9 @@ class MyGoState private constructor(private val app: Context) {
                     }.getOrDefault(emptyMap())
                     code to locales
                 }
-                val rt = PluginRuntime(app, plugin, source.first, source.second)
-                rt.onOpenURL = { url ->
+                val fresh = PluginRuntime(app, plugin, source.first, source.second)
+                rt = fresh
+                fresh.onOpenURL = { url ->
                     main.post {
                         runCatching {
                             val intent = android.content.Intent(
@@ -327,20 +391,32 @@ class MyGoState private constructor(private val app: Context) {
                         }
                     }
                 }
-                rt.load()
+                fresh.load()
+                if (gen != generation) {
+                    // A newer switch superseded this load while it was in
+                    // flight; drop the runtime instead of installing it.
+                    runCatching { fresh.close() }
+                    return@launch
+                }
                 runtime?.close()
-                runtime = rt
-                Player.runtime = rt
+                runtime = fresh
+                Player.runtime = fresh
                 manifest = plugin
                 prefs.edit().putString("plugin", plugin.id).apply()
                 pluginReady = true
                 refreshAccount()
                 loadHome()
                 loadLibrary()
+            } catch (e: CancellationException) {
+                if (runtime !== rt) runCatching { rt?.close() }
+                throw e
             } catch (e: Exception) {
-                android.util.Log.e("MyGoState", "plugin load failed: ${plugin.id}", e)
-                pluginError = e.message ?: "插件加载失败"
-                pluginReady = false
+                if (runtime !== rt) runCatching { rt?.close() }
+                if (gen == generation) {
+                    android.util.Log.e("MyGoState", "plugin load failed: ${plugin.id}", e)
+                    pluginError = e.message ?: "插件加载失败"
+                    pluginReady = false
+                }
             }
         }
     }
@@ -362,8 +438,33 @@ class MyGoState private constructor(private val app: Context) {
         return withContext(Dispatchers.IO) { rt.call(name, args, timeout) }
     }
 
-    private fun errorText(e: Throwable): String = when (e) {
-        is PluginCallException -> e.message ?: "调用失败"
+    /** Like [call], but keeps the pre-null-strip JSON for pagination counts (M14). */
+    private suspend fun callRaw(
+        name: String,
+        args: String = "{}",
+        timeout: Long = 60_000,
+    ): PluginRuntime.RawCallResult {
+        val rt = runtime ?: throw IllegalStateException("插件尚未就绪")
+        return withContext(Dispatchers.IO) { rt.callWithRaw(name, args, timeout) }
+    }
+
+    /**
+     * Plugins may resolve `null` (signed-out account, missing lyrics, …); the
+     * bridge delivers that as the literal string "null", which no model
+     * serializer accepts. Treat it as "no result" instead of leaking a raw
+     * English decode error into the UI (BUGS.md M16).
+     */
+    private fun <T> decodeOrNull(json: String, serializer: DeserializationStrategy<T>): T? =
+        if (json.trim() == "null") null else pluginJson.decodeFromString(serializer, json)
+
+    private fun errorText(e: Throwable): String = when {
+        e is PluginCallException && e.message?.contains("not exported") == true -> "此插件不支持该功能"
+        e is PluginCallException -> e.message ?: "调用失败"
+        // Decode failures used to surface the raw English serializer message
+        // (M16); give the user something actionable instead.
+        e is SerializationException -> "插件返回的数据无法解析，请重试或切换插件"
+        e.message?.contains("Timed out") == true -> "加载超时，请检查网络后重试"
+        e.message?.contains("插件已关闭") == true || e is CancellationException -> "插件已切换"
         else -> e.message ?: "出错了"
     }
 
@@ -379,17 +480,21 @@ class MyGoState private constructor(private val app: Context) {
 
     private fun refreshAccount() {
         if (!can("account")) return
-        scope.launch {
-            account = runCatching {
-                pluginJson.decodeFromString(Account.serializer(), call("account", "{}"))
+        val gen = generation
+        launchLoader {
+            val acc = runCatching {
+                decodeOrNull(call("account", "{}"), Account.serializer())
             }.getOrNull()
+            if (gen == generation) account = acc
         }
     }
 
     fun signOut() {
         if (!can("signOut")) return
-        scope.launch {
+        val gen = generation
+        launchLoader {
             runCatching { call("signOut", "{}") }
+            if (gen != generation) return@launchLoader
             account = null
             tab = Tab.Home
             stack = emptyList()
@@ -406,26 +511,45 @@ class MyGoState private constructor(private val app: Context) {
             return
         }
         if (signIn != null) return
+        // L20: the sign-in sheet is its own ModalBottomSheet; leaving the
+        // account sheet open stacked two sheets on top of each other.
+        sheet = null
+        val gen = generation
         signIn = SignInState()
         rt.onSignInPrompt = { qr, text ->
-            main.post {
-                val current = signIn ?: return@post
+            // L16c: QR encoding is CPU work — do it off the main thread and
+            // only publish the finished Bitmap back on main.
+            scope.launch {
+                val bitmap = qr?.takeIf { it.isNotBlank() }?.let {
+                    withContext(Dispatchers.Default) { qrBitmap(it, 720) }
+                }
+                if (gen != generation) return@launch
+                val current = signIn ?: return@launch
                 signIn = current.copy(
-                    qr = qr?.takeIf { it.isNotBlank() }?.let { qrBitmap(it, 720) } ?: current.qr,
+                    qr = bitmap ?: current.qr,
                     text = text?.takeIf { it.isNotBlank() } ?: current.text,
                 )
             }
         }
-        signInJob = scope.launch {
+        signInJob = launchLoader {
             try {
-                val acc = pluginJson.decodeFromString(Account.serializer(), call("signIn", "{}", 300_000))
+                val acc = decodeOrNull(call("signIn", "{}", 300_000), Account.serializer())
+                if (gen != generation) return@launchLoader
+                if (acc == null) {
+                    if (signIn != null) signIn = SignInState(error = "登录未返回账号信息", working = false)
+                    return@launchLoader
+                }
                 account = acc
                 signIn = null
                 toast("登录成功：${acc.name}")
                 loadHome(force = true)
                 loadLibrary()
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                if (signIn != null) signIn = SignInState(error = errorText(e), working = false)
+                if (gen == generation && signIn != null) {
+                    signIn = SignInState(error = errorText(e), working = false)
+                }
             } finally {
                 rt.onSignInPrompt = null
             }
@@ -549,13 +673,17 @@ class MyGoState private constructor(private val app: Context) {
             home = Load.Ready(BrowsePage())
             return
         }
+        val gen = generation
         home = Load.Loading
-        scope.launch {
-            home = try {
-                Load.Ready(pluginJson.decodeFromString(BrowsePage.serializer(), call("home", "{}")))
+        launchLoader {
+            val next = try {
+                Load.Ready(decodeOrNull(call("home", "{}"), BrowsePage.serializer()) ?: BrowsePage())
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Load.Failed(errorText(e))
             }
+            if (gen == generation) home = next
         }
     }
 
@@ -574,21 +702,25 @@ class MyGoState private constructor(private val app: Context) {
             return
         }
         if (pages[path] is Load.Ready) return
+        val gen = generation
         pages[path] = Load.Loading
-        scope.launch {
-            pages[path] = try {
+        launchLoader {
+            val next = try {
                 Load.Ready(
-                    pluginJson.decodeFromString(
-                        BrowsePage.serializer(),
+                    decodeOrNull(
                         call(
                             "browse",
                             buildJsonObject { if (path.isNotBlank()) put("page", path) }.toString(),
                         ),
-                    )
+                        BrowsePage.serializer(),
+                    ) ?: BrowsePage()
                 )
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Load.Failed(errorText(e))
             }
+            if (gen == generation) pages[path] = next
         }
     }
 
@@ -602,18 +734,20 @@ class MyGoState private constructor(private val app: Context) {
             return
         }
         if (library is Load.Ready && !force) return
+        val gen = generation
         library = Load.Loading
-        scope.launch {
-            library = try {
+        launchLoader {
+            val next = try {
                 Load.Ready(
-                    pluginJson.decodeFromString(
-                        ListSerializer(Playlist.serializer()),
-                        call("playlists", "{}"),
-                    )
+                    decodeOrNull(call("playlists", "{}"), ListSerializer(Playlist.serializer()))
+                        ?: emptyList()
                 )
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Load.Failed(errorText(e))
             }
+            if (gen == generation) library = next
         }
     }
 
@@ -622,24 +756,32 @@ class MyGoState private constructor(private val app: Context) {
             liked = Load.Failed("此插件没有喜欢列表")
             return
         }
+        if (!reset && likedLoadingMore) return
+        val gen = generation
         val existing = liked.readyOrNull()
         val offset = if (reset || existing == null) 0 else existing.tracks.size
         if (reset || existing == null) liked = Load.Loading else likedLoadingMore = true
-        scope.launch {
+        launchLoader {
             try {
-                val page = pluginJson.decodeFromString(
-                    TrackPage.serializer(),
+                val page = decodeOrNull(
                     call("liked", buildJsonObject { put("offset", offset) }.toString()),
-                )
-                val base = if (reset) null else liked.readyOrNull()
-                liked = Load.Ready(
-                    if (base == null) page else TrackPage(base.tracks + page.tracks, page.more)
-                )
-                refreshLikes(page.tracks.map { it.id })
+                    TrackPage.serializer(),
+                ) ?: TrackPage()
+                if (gen == generation) {
+                    val base = if (reset) null else liked.readyOrNull()
+                    liked = Load.Ready(
+                        if (base == null) page else TrackPage(base.tracks + page.tracks, page.more)
+                    )
+                    refreshLikes(page.tracks.map { it.id })
+                }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                if (liked.readyOrNull() == null) liked = Load.Failed(errorText(e)) else toast(errorText(e))
+                if (gen == generation) {
+                    if (liked.readyOrNull() == null) liked = Load.Failed(errorText(e)) else toast(errorText(e))
+                }
             } finally {
-                likedLoadingMore = false
+                if (gen == generation) likedLoadingMore = false
             }
         }
     }
@@ -649,18 +791,19 @@ class MyGoState private constructor(private val app: Context) {
             recent = Load.Failed("此插件没有最近播放")
             return
         }
+        val gen = generation
         recent = Load.Loading
-        scope.launch {
-            recent = try {
+        launchLoader {
+            val next = try {
                 Load.Ready(
-                    pluginJson.decodeFromString(
-                        ListSerializer(Track.serializer()),
-                        call("recent", "{}"),
-                    )
+                    decodeOrNull(call("recent", "{}"), ListSerializer(Track.serializer())) ?: emptyList()
                 )
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Load.Failed(errorText(e))
             }
+            if (gen == generation) recent = next
         }
     }
 
@@ -669,18 +812,19 @@ class MyGoState private constructor(private val app: Context) {
             showList = Load.Failed("此插件没有播客功能")
             return
         }
+        val gen = generation
         showList = Load.Loading
-        scope.launch {
-            showList = try {
+        launchLoader {
+            val next = try {
                 Load.Ready(
-                    pluginJson.decodeFromString(
-                        ListSerializer(ShowItem.serializer()),
-                        call("shows", "{}"),
-                    )
+                    decodeOrNull(call("shows", "{}"), ListSerializer(ShowItem.serializer())) ?: emptyList()
                 )
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Load.Failed(errorText(e))
             }
+            if (gen == generation) showList = next
         }
     }
 
@@ -688,70 +832,92 @@ class MyGoState private constructor(private val app: Context) {
 
     fun loadPlaylist(id: String) {
         if (playlistDetails[id] is Load.Ready) return
+        val gen = generation
         playlistDetails[id] = Load.Loading
-        scope.launch {
-            playlistDetails[id] = try {
+        launchLoader {
+            val next = try {
                 Load.Ready(
-                    pluginJson.decodeFromString(Playlist.serializer(), call("playlist", args("id" to id)))
+                    decodeOrNull(call("playlist", args("id" to id)), Playlist.serializer())
+                        ?: Playlist(id = id)
                 )
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Load.Failed(errorText(e))
             }
+            if (gen == generation) playlistDetails[id] = next
         }
     }
 
     fun loadAlbum(id: String) {
         if (albumDetails[id] is Load.Ready) return
+        val gen = generation
         albumDetails[id] = Load.Loading
-        scope.launch {
-            albumDetails[id] = try {
+        launchLoader {
+            val next = try {
                 Load.Ready(
-                    pluginJson.decodeFromString(
-                        AlbumPageResult.serializer(),
-                        call("album", args("id" to id)),
-                    )
+                    decodeOrNull(call("album", args("id" to id)), AlbumPageResult.serializer())
+                        ?: AlbumPageResult(album = Album(id = id))
                 )
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Load.Failed(errorText(e))
             }
+            if (gen == generation) albumDetails[id] = next
         }
     }
 
     fun loadArtist(id: String) {
         if (artistDetails[id] is Load.Ready) return
+        val gen = generation
         artistDetails[id] = Load.Loading
-        scope.launch {
-            artistDetails[id] = try {
+        launchLoader {
+            val next = try {
                 Load.Ready(
-                    pluginJson.decodeFromString(
-                        ArtistPageResult.serializer(),
-                        call("artist", args("id" to id)),
-                    )
+                    decodeOrNull(call("artist", args("id" to id)), ArtistPageResult.serializer())
+                        ?: ArtistPageResult(artist = Artist(id = id))
                 )
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Load.Failed(errorText(e))
             }
+            if (gen == generation) artistDetails[id] = next
         }
     }
 
     fun loadShow(id: String, reset: Boolean = false) {
+        // H7: the old `if (!reset && existing != null) return` guard made the
+        // append path unreachable, so 加载更多 did nothing. Only block a second
+        // concurrent append now (mirrors loadLiked); the first page still loads
+        // when there is nothing cached yet.
+        if (!reset && showLoadingMore) return
+        val gen = generation
         val existing = showDetails[id].readyOrNull()
-        if (!reset && existing != null) return
         val offset = if (reset || existing == null) 0 else existing.episodes.size
-        if (reset || existing == null) showDetails[id] = Load.Loading
-        scope.launch {
+        if (reset || existing == null) showDetails[id] = Load.Loading else showLoadingMore = true
+        launchLoader {
             try {
-                val page = pluginJson.decodeFromString(
-                    ShowPageResult.serializer(),
+                val page = decodeOrNull(
                     call("show", buildJsonObject { put("id", id); put("offset", offset) }.toString()),
-                )
-                val base = if (reset) null else showDetails[id].readyOrNull()
-                showDetails[id] = Load.Ready(
-                    if (base == null) page else page.copy(episodes = base.episodes + page.episodes)
-                )
+                    ShowPageResult.serializer(),
+                ) ?: ShowPageResult()
+                if (gen == generation) {
+                    val base = if (reset) null else showDetails[id].readyOrNull()
+                    showDetails[id] = Load.Ready(
+                        if (base == null) page else page.copy(episodes = base.episodes + page.episodes)
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                if (showDetails[id].readyOrNull() == null) showDetails[id] = Load.Failed(errorText(e))
-                else toast(errorText(e))
+                if (gen == generation) {
+                    if (showDetails[id].readyOrNull() == null) showDetails[id] = Load.Failed(errorText(e))
+                    else toast(errorText(e))
+                }
+            } finally {
+                if (gen == generation) showLoadingMore = false
             }
         }
     }
@@ -766,14 +932,14 @@ class MyGoState private constructor(private val app: Context) {
             return
         }
         if (!can("suggest")) return
+        val gen = generation
         suggestJob = scope.launch {
             delay(220)
-            runCatching {
-                pluginJson.decodeFromString(
-                    ListSerializer(String.serializer()),
-                    call("suggest", args("query" to text)),
-                )
-            }.onSuccess { if (searchQuery == text) suggestions = it }
+            val next = runCatching {
+                decodeOrNull(call("suggest", args("query" to text)), ListSerializer(String.serializer()))
+                    ?: emptyList()
+            }.getOrNull()
+            if (gen == generation && next != null && searchQuery == text) suggestions = next
         }
     }
 
@@ -799,29 +965,41 @@ class MyGoState private constructor(private val app: Context) {
             return
         }
         searchJob?.cancel()
+        val gen = generation
+        val kind = searchKind
         val offset = if (reset) 0 else searchOffset
         if (reset) search = Load.Loading else searchLoadingMore = true
         searchJob = scope.launch {
             try {
-                val result = pluginJson.decodeFromString(
-                    SearchResult.serializer(),
-                    call(
-                        "search",
-                        buildJsonObject {
-                            put("query", query)
-                            put("kind", searchKind.api)
-                            put("offset", offset)
-                        }.toString(),
-                    ),
+                val raw = callRaw(
+                    "search",
+                    buildJsonObject {
+                        put("query", query)
+                        put("kind", kind.api)
+                        put("offset", offset)
+                    }.toString(),
                 )
-                searchOffset = offset + result.countFor(searchKind)
-                val base = if (reset) null else search.readyOrNull()
-                search = Load.Ready(if (base == null) result else base.merge(result))
-                refreshLikes(result.tracks.map { it.id })
+                val result = decodeOrNull(raw.stripped, SearchResult.serializer()) ?: SearchResult()
+                // M14: the bridge strips null placeholders, shrinking the arrays.
+                // Paging by the stripped count re-fetches rows on 加载更多, so the
+                // consumed offset must come from the RAW (pre-strip) array length.
+                val consumed = runCatching {
+                    pluginJson.parseToJsonElement(raw.raw).jsonObject[kind.api]?.jsonArray?.size
+                }.getOrNull() ?: result.countFor(kind)
+                if (gen == generation) {
+                    searchOffset = offset + consumed
+                    val base = if (reset) null else search.readyOrNull()
+                    search = Load.Ready(if (base == null) result else base.merge(result))
+                    refreshLikes(result.tracks.map { it.id })
+                }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                if (reset) search = Load.Failed(errorText(e)) else toast(errorText(e))
+                if (gen == generation) {
+                    if (reset) search = Load.Failed(errorText(e)) else toast(errorText(e))
+                }
             } finally {
-                searchLoadingMore = false
+                if (gen == generation) searchLoadingMore = false
             }
         }
     }
@@ -837,7 +1015,8 @@ class MyGoState private constructor(private val app: Context) {
 
     fun refreshLikes(ids: List<String>) {
         if (ids.isEmpty() || !can("isLiked")) return
-        scope.launch {
+        val gen = generation
+        launchLoader {
             runCatching {
                 val json = call(
                     "isLiked",
@@ -845,8 +1024,20 @@ class MyGoState private constructor(private val app: Context) {
                         put("ids", buildJsonArray { ids.forEach { add(it) } })
                     }.toString(),
                 )
-                pluginJson.parseToJsonElement(json).jsonObject.forEach { (id, value) ->
+                if (json.trim() == "null") return@runCatching
+                val values = pluginJson.parseToJsonElement(json).jsonObject
+                if (gen != generation) return@runCatching
+                values.forEach { (id, value) ->
                     likedIds[id] = value.jsonPrimitive.content.lowercase() == "true"
+                }
+                // M17: keep the player heart in sync. Previously only likedIds
+                // was written, so currentLiked stayed stale and a tap could
+                // accidentally UNLIKE. Update it from the authoritative result
+                // whenever the current track is part of the answer.
+                currentTrack?.let { track ->
+                    values[track.id]?.let { value ->
+                        currentLiked = value.jsonPrimitive.content.lowercase() == "true"
+                    }
                 }
             }
         }
@@ -858,14 +1049,19 @@ class MyGoState private constructor(private val app: Context) {
             return
         }
         val target = !isLiked(track.id)
-        scope.launch {
+        val gen = generation
+        launchLoader {
             runCatching {
                 call("like", args("id" to track.id, "on" to target))
             }.onSuccess {
-                likedIds[track.id] = target
-                if (currentTrack?.id == track.id) currentLiked = target
-                toast(if (target) "已添加到喜欢的音乐" else "已取消喜欢")
-            }.onFailure { toast(errorText(it)) }
+                if (gen == generation) {
+                    likedIds[track.id] = target
+                    if (currentTrack?.id == track.id) currentLiked = target
+                    toast(if (target) "已添加到喜欢的音乐" else "已取消喜欢")
+                }
+            }.onFailure {
+                if (gen == generation && it !is CancellationException) toast(errorText(it))
+            }
         }
     }
 
@@ -874,9 +1070,11 @@ class MyGoState private constructor(private val app: Context) {
     fun saveAlbum(album: Album) {
         if (!can("saveAlbum")) return
         val target = !album.saved
-        scope.launch {
+        val gen = generation
+        launchLoader {
             runCatching { call("saveAlbum", args("id" to album.id, "on" to target)) }
                 .onSuccess {
+                    if (gen != generation) return@onSuccess
                     albumDetails.keys.toList().forEach { key ->
                         val page = albumDetails[key]?.readyOrNull() ?: return@forEach
                         if (page.album.id == album.id) {
@@ -885,16 +1083,18 @@ class MyGoState private constructor(private val app: Context) {
                     }
                     toast(if (target) "已收藏专辑" else "已取消收藏")
                 }
-                .onFailure { toast(errorText(it)) }
+                .onFailure { if (gen == generation && it !is CancellationException) toast(errorText(it)) }
         }
     }
 
     fun subscribeShow(show: ShowItem) {
         if (!can("subscribeShow")) return
         val target = !show.subscribed
-        scope.launch {
+        val gen = generation
+        launchLoader {
             runCatching { call("subscribeShow", args("id" to show.id, "on" to target)) }
                 .onSuccess {
+                    if (gen != generation) return@onSuccess
                     showDetails.keys.toList().forEach { key ->
                         val page = showDetails[key]?.readyOrNull() ?: return@forEach
                         if (page.show.id == show.id) {
@@ -903,17 +1103,18 @@ class MyGoState private constructor(private val app: Context) {
                     }
                     toast(if (target) "已订阅" else "已取消订阅")
                 }
-                .onFailure { toast(errorText(it)) }
+                .onFailure { if (gen == generation && it !is CancellationException) toast(errorText(it)) }
         }
     }
 
     fun followArtist(artist: Artist) {
         if (!can("followArtist")) return
         val target = !artist.following
-        scope.launch {
+        val gen = generation
+        launchLoader {
             runCatching { call("followArtist", args("id" to artist.id, "on" to target)) }
-                .onSuccess { toast(if (target) "已关注" else "已取消关注") }
-                .onFailure { toast(errorText(it)) }
+                .onSuccess { if (gen == generation) toast(if (target) "已关注" else "已取消关注") }
+                .onFailure { if (gen == generation && it !is CancellationException) toast(errorText(it)) }
         }
     }
 
@@ -932,19 +1133,22 @@ class MyGoState private constructor(private val app: Context) {
 
     fun playStation(id: String, name: String) {
         if (!can("stationNext")) return
-        scope.launch {
+        val gen = generation
+        launchLoader {
             runCatching {
-                pluginJson.decodeFromString(
-                    ListSerializer(Track.serializer()),
-                    call("stationNext", args("id" to id)),
-                )
+                decodeOrNull(call("stationNext", args("id" to id)), ListSerializer(Track.serializer()))
+                    ?: emptyList()
             }.onSuccess { tracks ->
-                if (tracks.isEmpty()) toast("电台暂时没有歌")
-                else {
-                    playQueue(tracks, 0)
-                    toast("正在播放：$name")
+                if (gen == generation) {
+                    if (tracks.isEmpty()) toast("电台暂时没有歌")
+                    else {
+                        playQueue(tracks, 0)
+                        toast("正在播放：$name")
+                    }
                 }
-            }.onFailure { toast(errorText(it)) }
+            }.onFailure {
+                if (gen == generation && it !is CancellationException) toast(errorText(it))
+            }
         }
     }
 
@@ -985,7 +1189,9 @@ class MyGoState private constructor(private val app: Context) {
             currentLiked = track?.let { isLiked(it.id) } ?: false
             lyrics = Load.Idle
             if (track != null) {
-                if (can("played")) scope.launch { runCatching { call("played", args("id" to track.id)) } }
+                // `played` is reported by Player after a successful stream
+                // resolve (actual playback). Reporting it here too double-fired
+                // the non-idempotent call and added bridge concurrency.
                 refreshLikes(listOf(track.id))
             }
         }
@@ -1004,18 +1210,24 @@ class MyGoState private constructor(private val app: Context) {
             lyrics = Load.Failed("此插件没有歌词")
             return
         }
+        val gen = generation
+        val trackId = track.id
         lyrics = Load.Loading
-        scope.launch {
-            lyrics = try {
+        launchLoader {
+            val next = try {
                 Load.Ready(
-                    pluginJson.decodeFromString(
-                        Lyrics.serializer(),
-                        call("lyrics", args("id" to track.id), 15_000),
-                    )
+                    decodeOrNull(call("lyrics", args("id" to trackId), 15_000), Lyrics.serializer())
+                        ?: Lyrics()
                 )
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Load.Failed(errorText(e))
             }
+            // H6: only publish if we're still on the same track and session. A
+            // slow answer for the previous song must not overwrite the new
+            // song's lyrics (or its reset Idle/Loading state).
+            if (gen == generation && currentTrack?.id == trackId) lyrics = next
         }
     }
 

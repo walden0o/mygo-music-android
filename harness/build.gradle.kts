@@ -23,6 +23,14 @@ tasks.withType<JavaExec> {
     jvmArgs("-Dfile.encoding=UTF-8")
 }
 
+// Single source of truth: the harness must exercise the SAME prelude the app
+// ships. It used to carry a private copy that silently drifted out of sync,
+// so "harness passes" said nothing about the real host.
+tasks.named<ProcessResources>("processResources") {
+    from(rootProject.file("../app/src/main/assets/prelude.js"))
+    duplicatesStrategy = DuplicatesStrategy.INCLUDE
+}
+
 kotlin {
     jvmToolchain(17)
 }

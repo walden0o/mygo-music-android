@@ -99,22 +99,45 @@ fun aesEcbHex(key: String, text: String): String {
     return cipher.doFinal(text.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
 }
 
+/**
+ * Plain by default. The TLS-trust override and the HTTP proxy are opt-in via
+ * environment variables, because they used to be hardcoded to one developer's
+ * machine (a private .p12 and a localhost proxy), which made the harness
+ * unusable anywhere else.
+ *
+ *   MYGO_HARNESS_TRUSTSTORE=/path/to/trust.p12   (optional)
+ *   MYGO_HARNESS_TRUSTSTORE_PASSWORD=changeit    (optional, default "changeit")
+ *   MYGO_HARNESS_PROXY=host:port                 (optional)
+ */
 fun httpClient(): OkHttpClient {
-    val ks = KeyStore.getInstance("PKCS12")
-    File("/home/hatch/workspace/tools/hatch-trust.p12").inputStream().use { ks.load(it, "changeit".toCharArray()) }
-    val tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
-    tmf.init(ks)
-    val ssl = SSLContext.getInstance("TLS")
-    ssl.init(null, tmf.trustManagers, null)
-    return OkHttpClient.Builder()
-        .proxy(Proxy(Proxy.Type.HTTP, InetSocketAddress("::1", 18080)))
-        .sslSocketFactory(ssl.socketFactory, tmf.trustManagers[0] as X509TrustManager)
+    val builder = OkHttpClient.Builder()
         .followRedirects(false)
         .followSslRedirects(false)
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
-        .build()
+
+    System.getenv("MYGO_HARNESS_TRUSTSTORE")?.takeIf { it.isNotBlank() }?.let { path ->
+        val file = File(path)
+        require(file.isFile) { "MYGO_HARNESS_TRUSTSTORE does not exist: $path" }
+        val password = (System.getenv("MYGO_HARNESS_TRUSTSTORE_PASSWORD") ?: "changeit").toCharArray()
+        val ks = KeyStore.getInstance("PKCS12")
+        file.inputStream().use { ks.load(it, password) }
+        val tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
+        tmf.init(ks)
+        val ssl = SSLContext.getInstance("TLS")
+        ssl.init(null, tmf.trustManagers, null)
+        builder.sslSocketFactory(ssl.socketFactory, tmf.trustManagers[0] as X509TrustManager)
+    }
+
+    System.getenv("MYGO_HARNESS_PROXY")?.takeIf { it.isNotBlank() }?.let { spec ->
+        val host = spec.substringBeforeLast(':')
+        val port = spec.substringAfterLast(':').toIntOrNull()
+        require(port != null && port in 1..65535) { "MYGO_HARNESS_PROXY must be host:port, got: $spec" }
+        builder.proxy(Proxy(Proxy.Type.HTTP, InetSocketAddress(host, port)))
+    }
+
+    return builder.build()
 }
 
 fun jsStr(s: String): String = Json.encodeToString(s)
@@ -126,7 +149,8 @@ class Runtime(
     private val engine: QuickJs,
     private val host: HostState,
 ) {
-    private var pending: CompletableDeferred<String>? = null
+    private val pendingCalls = java.util.concurrent.ConcurrentHashMap<Long, CompletableDeferred<String>>()
+    private val nextCallId = java.util.concurrent.atomic.AtomicLong(0)
     private var delayId = 0L
     private val delays = mutableMapOf<Long, Job>()
 
@@ -142,7 +166,11 @@ class Runtime(
         engine.function("_language") { "zh-CN" }
         engine.function("_signInPrompt") { a -> println("  [signInPrompt] ${a[0]}"); null }
         engine.function("_openURL") { a -> println("  [openURL] ${a[0]}"); null }
-        engine.function("_deliver") { a -> pending?.complete(a[0] as String); null }
+        engine.function("_deliver") { a ->
+            val id = (a[0] as Number).toLong()
+            pendingCalls.remove(id)?.complete(a[1] as String)
+            null
+        }
         engine.function("_nextDelayId") { delayId++ }
         engine.function("_cancelDelayInternal") { a ->
             delays.remove((a[0] as Number).toLong())?.cancel(); null
@@ -161,6 +189,13 @@ class Runtime(
         }
         val prelude = object {}.javaClass.getResource("/prelude.js")!!.readText()
         engine.evaluate<Any?>(prelude, "prelude.js")
+        // Mirror the app's dirs.js: plugins such as bilibili touch `host` at
+        // module top level, so it must exist before the entry module is loaded.
+        val dataDir = File("build/harness-plugin-data").apply { mkdirs() }.absolutePath
+        engine.evaluate<Any?>(
+            "host.dir = ${jsStr(dataDir)}; host.dataDir = ${jsStr(dataDir)};",
+            "dirs.js",
+        )
     }
 
     suspend fun loadModule(entryCode: String) {
@@ -168,21 +203,24 @@ class Runtime(
     }
 
     suspend fun call(name: String, argsJson: String, timeoutMs: Long = 120_000): String {
+        val id = nextCallId.incrementAndGet()
         val deferred = CompletableDeferred<String>()
-        pending = deferred
+        pendingCalls[id] = deferred
         var evaluateError: Exception? = null
         try {
-            engine.evaluate<Any?>("__invoke(${jsStr(name)}, ${jsStr(argsJson)})", "invoke.js")
+            engine.evaluate<Any?>("__invoke(${jsStr(name)}, ${jsStr(argsJson)}, $id)", "invoke.js")
         } catch (e: Exception) {
-            // dokar alpha13's evaluate also surfaces plugin promise rejections
-            // it observes while draining jobs; the authoritative result still
-            // arrives through _deliver, so only fall back to this if it doesn't.
+            // quickjs-kt can surface plugin promise rejections while draining
+            // jobs; the authoritative result still arrives through _deliver,
+            // so only fall back to this if it doesn't.
             evaluateError = e
         }
         val resultJson = try {
             withTimeout(timeoutMs) { deferred.await() }
         } catch (e: Exception) {
             throw evaluateError ?: e
+        } finally {
+            pendingCalls.remove(id)
         }
         val st = json.parseToJsonElement(resultJson).jsonObject
         if (st["ok"]?.jsonPrimitive?.boolean == true) {
@@ -212,7 +250,21 @@ suspend fun test(name: String, block: suspend () -> String) {
 }
 
 fun main(args: Array<String>) = runBlocking {
-    val pluginDir = File(args.getOrElse(0) { "/home/hatch/workspace/mygo-android/ref-src/mygo-music-netease-cloud-music-main" })
+    // Default to a plugin bundled in this repo, so the harness runs on a fresh
+    // clone with no arguments. Override with argv[0] or MYGO_HARNESS_PLUGIN_DIR.
+    val defaultPluginDir = File("../app/src/main/assets/plugins/netease-cloud-music").let { bundled ->
+        if (bundled.isDirectory) bundled.path
+        else File("app/src/main/assets/plugins/netease-cloud-music").path
+    }
+    val pluginDir = File(
+        args.getOrNull(0)
+            ?: System.getenv("MYGO_HARNESS_PLUGIN_DIR")
+            ?: defaultPluginDir
+    )
+    require(pluginDir.isDirectory) {
+        "plugin directory not found: ${pluginDir.absolutePath}\n" +
+            "pass a path as the first argument, or set MYGO_HARNESS_PLUGIN_DIR"
+    }
     val manifest = json.parseToJsonElement(File(pluginDir, "plugin.json").readText()).jsonObject
     println("plugin: ${manifest["name"]?.jsonPrimitive?.content} v${manifest["version"]?.jsonPrimitive?.content} (${manifest["id"]?.jsonPrimitive?.content})")
     val mainFile = manifest["main"]?.jsonPrimitive?.content ?: "index.js"
@@ -231,9 +283,12 @@ fun main(args: Array<String>) = runBlocking {
     )
 
     val engine = QuickJs.create(jobDispatcher = Dispatchers.Default)
-    engine.addModule("plugin-entry", pluginSource)
     val runtime = Runtime(engine, host)
+    // Install bindings + prelude FIRST. addModule() evaluates the module's top
+    // level, and plugins such as bilibili touch `host` there — registering the
+    // module before the prelude existed threw "host is not defined".
     runtime.install()
+    engine.addModule("plugin-entry", pluginSource)
 
     // Engine smoke test before the real plugin: async + setTimeout end to end.
     engine.evaluate<Any?>(
@@ -253,6 +308,11 @@ fun main(args: Array<String>) = runBlocking {
         println("MODULE LOAD FAILED: ${e.message}")
     }
     println("exports are exercised through the calls below")
+
+    // Mirror the app's warm-up (PluginRuntime.load): the engine can trip an
+    // internal result-box error on the first call after a module load, so burn
+    // it on a side-effect-free export before the real assertions run.
+    runCatching { runtime.call("account", "{}", timeoutMs = 30_000) }
 
     test("account (logged out)") {
         val r = runtime.call("account", "{}")

@@ -22,12 +22,12 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
-import androidx.compose.material.icons.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
@@ -74,7 +74,9 @@ fun PlayerScreen(state: MyGoState) {
     val track = state.currentTrack ?: return
     val extras = LocalMyGoExtras.current
     val tab = state.playerTab
-    LaunchedEffect(tab) { if (tab == 1) state.loadLyrics() }
+    // H6: key on the track as well, so changing songs while the lyrics tab is
+    // open re-loads lyrics (refreshPlayer resets them to Idle on track change).
+    LaunchedEffect(tab, track.id) { if (tab == 1) state.loadLyrics() }
 
     Surface(color = MaterialTheme.colorScheme.background, modifier = Modifier.fillMaxSize()) {
         Box(Modifier.fillMaxSize()) {
@@ -131,7 +133,7 @@ fun PlayerScreen(state: MyGoState) {
                     )
                     IconButton(onClick = { state.openQueue() }) {
                         Icon(
-                            Icons.Rounded.QueueMusic,
+                            Icons.AutoMirrored.Rounded.QueueMusic,
                             contentDescription = "播放队列",
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -335,7 +337,7 @@ private fun Transport(state: MyGoState) {
         }
         IconButton(onClick = { state.openQueue() }) {
             Icon(
-                Icons.Rounded.QueueMusic,
+                Icons.AutoMirrored.Rounded.QueueMusic,
                 contentDescription = "队列",
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )

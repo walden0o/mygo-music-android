@@ -18,12 +18,12 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.Album
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.MusicNote
-import androidx.compose.material.icons.rounded.QueueMusic
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -167,7 +167,7 @@ private fun ShortcutChips(state: MyGoState) {
     val chips = buildList {
         if (state.can("liked")) add(Triple("喜欢的音乐", Icons.Rounded.Favorite, Route.Liked))
         if (state.can("recent")) add(Triple("最近播放", Icons.Rounded.History, Route.Recent))
-        if (state.can("playlists")) add(Triple("我的歌单", Icons.Rounded.QueueMusic, Route.Playlists))
+        if (state.can("playlists")) add(Triple("我的歌单", Icons.AutoMirrored.Rounded.QueueMusic, Route.Playlists))
         if (state.can("shows")) add(Triple("播客", Icons.Rounded.Mic, Route.Shows))
     }
     if (chips.isEmpty()) return
@@ -368,7 +368,7 @@ private fun LazyListScope.browseSections(
     state: MyGoState,
     sections: List<Section>,
 ) {
-    sections.forEach { section ->
+    sections.forEachIndexed { sectionIndex, section ->
         val title = section.title?.takeIf { it.isNotBlank() }
         val hasContent = section.tracks.isNotEmpty() || section.albums.isNotEmpty() ||
             section.artists.isNotEmpty() || section.playlists.isNotEmpty() ||
@@ -376,16 +376,16 @@ private fun LazyListScope.browseSections(
             section.links.isNotEmpty()
         if (!hasContent) {
             if (!section.empty.isNullOrBlank()) {
-                item("empty-${section.hashCode()}") {
+                item("empty-${sectionIndex}") {
                     SectionHeader(title ?: "")
                     EmptyState(section.empty!!)
                 }
             }
-            return@forEach
+            return@forEachIndexed
         }
 
         if (title != null) {
-            item("title-${section.hashCode()}") {
+            item("title-${sectionIndex}") {
                 SectionHeader(
                     title,
                     subtitle = section.subtitle,
@@ -395,7 +395,7 @@ private fun LazyListScope.browseSections(
         }
 
         if (section.tracks.isNotEmpty()) {
-            item("tracks-${section.hashCode()}") {
+            item("tracks-${sectionIndex}") {
                 LazyRow(
                     contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 20.dp),
                     horizontalArrangement = Arrangement.spacedBy(14.dp),
@@ -413,7 +413,7 @@ private fun LazyListScope.browseSections(
         }
 
         if (section.albums.isNotEmpty()) {
-            item("albums-${section.hashCode()}") {
+            item("albums-${sectionIndex}") {
                 LazyRow(
                     contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 20.dp),
                     horizontalArrangement = Arrangement.spacedBy(14.dp),
@@ -431,7 +431,7 @@ private fun LazyListScope.browseSections(
         }
 
         if (section.artists.isNotEmpty()) {
-            item("artists-${section.hashCode()}") {
+            item("artists-${sectionIndex}") {
                 LazyRow(
                     contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 20.dp),
                     horizontalArrangement = Arrangement.spacedBy(16.dp),
@@ -444,7 +444,7 @@ private fun LazyListScope.browseSections(
         }
 
         if (section.playlists.isNotEmpty()) {
-            item("playlists-${section.hashCode()}") {
+            item("playlists-${sectionIndex}") {
                 LazyRow(
                     contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 20.dp),
                     horizontalArrangement = Arrangement.spacedBy(14.dp),
@@ -462,7 +462,7 @@ private fun LazyListScope.browseSections(
         }
 
         if (section.shows.isNotEmpty()) {
-            item("shows-${section.hashCode()}") {
+            item("shows-${sectionIndex}") {
                 LazyRow(
                     contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 20.dp),
                     horizontalArrangement = Arrangement.spacedBy(14.dp),
@@ -481,7 +481,7 @@ private fun LazyListScope.browseSections(
         }
 
         if (section.stations.isNotEmpty()) {
-            item("stations-${section.hashCode()}") {
+            item("stations-${sectionIndex}") {
                 LazyRow(
                     contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 20.dp),
                     horizontalArrangement = Arrangement.spacedBy(14.dp),
@@ -499,7 +499,7 @@ private fun LazyListScope.browseSections(
         }
 
         if (section.links.isNotEmpty()) {
-            item("links-${section.hashCode()}") {
+            item("links-${sectionIndex}") {
                 Column {
                     section.links.forEach { link ->
                         NavigateRow(

@@ -19,12 +19,12 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Login
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.Person
-import androidx.compose.material.icons.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.SwapHoriz
 import androidx.compose.material3.Icon
@@ -88,7 +88,7 @@ fun LibraryScreen(state: MyGoState) {
                     NavigateRow(
                         title = "我的歌单",
                         subtitle = if (playlists.isEmpty()) null else "${playlists.size} 个歌单",
-                        leadingIcon = Icons.Rounded.QueueMusic,
+                        leadingIcon = Icons.AutoMirrored.Rounded.QueueMusic,
                         iconTint = MaterialTheme.colorScheme.secondary,
                         onClick = { state.push(Route.Playlists) },
                     )

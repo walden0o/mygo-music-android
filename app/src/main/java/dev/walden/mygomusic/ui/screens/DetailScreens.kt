@@ -334,7 +334,14 @@ fun ShowDetailScreen(state: MyGoState, route: Route.ShowDetail) {
             if (page.more) {
                 item {
                     Box(Modifier.fillMaxWidth().padding(14.dp), contentAlignment = Alignment.Center) {
-                        TextButton(onClick = { state.loadShow(route.id) }) { Text("加载更多") }
+                        if (state.showLoadingMore) {
+                            androidx.compose.material3.CircularProgressIndicator(
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(22.dp),
+                            )
+                        } else {
+                            TextButton(onClick = { state.loadShow(route.id) }) { Text("加载更多") }
+                        }
                     }
                 }
             }

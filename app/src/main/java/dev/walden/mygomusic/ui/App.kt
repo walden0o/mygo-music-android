@@ -67,6 +67,8 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import dev.walden.mygomusic.ui.components.CoverImage
 import dev.walden.mygomusic.ui.components.PersonAvatar
 import dev.walden.mygomusic.ui.screens.BrowseRouteScreen
@@ -98,12 +100,18 @@ fun MyGoApp(state: MyGoState) {
         val scope = rememberCoroutineScope()
         val context = LocalContext.current
 
-        // Android 13+: the media notification needs a runtime permission; ask once.
+        // Android 13+: the media notification needs a runtime permission. Ask
+        // once; if denied, remember it (no nagging on later launches) and offer
+        // a recovery entry in Settings instead (BUGS.md L16a).
         val notificationPermission = rememberLauncherForActivityResult(
             ActivityResultContracts.RequestPermission()
-        ) { }
+        ) { granted ->
+            if (granted) state.clearNotificationPermissionDenied()
+            else state.markNotificationPermissionDenied()
+        }
         LaunchedEffect(Unit) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                !state.notificationPermissionDenied &&
                 androidx.core.content.ContextCompat.checkSelfPermission(
                     context, Manifest.permission.POST_NOTIFICATIONS
                 ) != PackageManager.PERMISSION_GRANTED
@@ -111,12 +119,27 @@ fun MyGoApp(state: MyGoState) {
                 notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
             }
         }
+        // If the user grants it from system settings, drop the denial flag so
+        // the Settings recovery row disappears when they return.
+        LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                androidx.core.content.ContextCompat.checkSelfPermission(
+                    context, Manifest.permission.POST_NOTIFICATIONS
+                ) == PackageManager.PERMISSION_GRANTED
+            ) {
+                state.clearNotificationPermissionDenied()
+            }
+        }
 
-        // Keep the playback mirror fresh while a queue is active.
+        // Keep the playback mirror fresh. Only tick while actually playing —
+        // when paused/idle the position is static, so one refresh suffices. The
+        // effect keys restart it when playback starts/stops or the track changes
+        // (Player.onUiUpdate -> refreshPlayer keeps those transitions responsive).
         LaunchedEffect(state.isPlaying, state.currentTrack?.id) {
-            while (true) {
-                state.refreshPlayer()
+            state.refreshPlayer()
+            while (state.isPlaying) {
                 kotlinx.coroutines.delay(500)
+                state.refreshPlayer()
             }
         }
 

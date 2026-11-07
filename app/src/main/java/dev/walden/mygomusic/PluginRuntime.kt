@@ -13,6 +13,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.encodeToString
@@ -180,9 +182,25 @@ class PluginRuntime(
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    private var pending: CompletableDeferred<String>? = null
-    private var delayId = 0L
-    private val delays = mutableMapOf<Long, Job>()
+    /**
+     * In-flight calls keyed by a monotonically increasing id.
+     *
+     * A single shared slot used to be overwritten by every concurrent caller,
+     * so `_deliver` handed a result to whichever call had registered last:
+     * results were cross-wired and the displaced caller hung until timeout.
+     * The JS side now echoes the id back, so delivery is exact.
+     */
+    private val pendingCalls = java.util.concurrent.ConcurrentHashMap<Long, CompletableDeferred<String>>()
+    private val nextCallId = java.util.concurrent.atomic.AtomicLong(0)
+
+    /** Serialises native evaluation (and engine teardown) — QuickJS is single-threaded. */
+    private val engineMutex = kotlinx.coroutines.sync.Mutex()
+
+    @Volatile
+    private var closed = false
+
+    private val delayId = java.util.concurrent.atomic.AtomicLong(0)
+    private val delays = java.util.concurrent.ConcurrentHashMap<Long, Job>()
 
     @Volatile
     var exports: Set<String> = emptySet()
@@ -244,7 +262,29 @@ class PluginRuntime(
     }
 
     suspend fun load() {
-        engine.function("_log") { null }
+        // Bindings + module evaluation must not race engine teardown: a plugin
+        // switch can close this runtime while it is still loading. The warm-up
+        // call below is deliberately OUTSIDE the lock — Mutex is not reentrant
+        // and call() takes the same lock.
+        engineMutex.withLock {
+            check(!closed) { "插件已关闭" }
+            loadLocked()
+        }
+        // Warm-up: the engine can trip an internal result-box error on the
+        // first call after a module load. Absorb it here on a side-effect-free
+        // export so the first real user call is clean.
+        if (can("account")) {
+            runCatching { call("account", "{}", timeoutMs = 30_000) }
+        }
+    }
+
+    private suspend fun loadLocked() {
+        engine.function("_log") { a ->
+            // Plugin console output used to be dropped on the floor, which made
+            // diagnosing plugin-side failures guesswork.
+            android.util.Log.d("MyGoPlugin", "[${manifest.id}] ${a.getOrNull(0)}")
+            null
+        }
         engine.function("_storageGet") { a -> synchronized(storage) { storage[a[0] as String] } }
         engine.function("_storageSet") { a ->
             synchronized(storage) { storage[a[0] as String] = a[1] as String; persistStorage() }
@@ -268,7 +308,11 @@ class PluginRuntime(
             null
         }
         engine.function("_openURL") { a -> onOpenURL?.invoke(a[0] as String); null }
-        engine.function("_deliver") { a -> pending?.complete(a[0] as String); null }
+        engine.function("_deliver") { a ->
+            val id = (a[0] as Number).toLong()
+            pendingCalls.remove(id)?.complete(a[1] as String)
+            null
+        }
         engine.function("_exportsReady") { a ->
             exports = try {
                 pluginJson.parseToJsonElement(a[0] as String).let { e ->
@@ -277,7 +321,7 @@ class PluginRuntime(
             } catch (e: Exception) { emptySet() }
             null
         }
-        engine.function("_nextDelayId") { delayId++ }
+        engine.function("_nextDelayId") { delayId.incrementAndGet() }
         engine.function("_cancelDelayInternal") { a ->
             delays.remove((a[0] as Number).toLong())?.cancel(); null
         }
@@ -305,12 +349,6 @@ class PluginRuntime(
             "entry.js",
             asModule = true,
         )
-        // Warm-up: dokar alpha13's evaluate can trip an internal result-box
-        // error on the first call after a module load. Absorb it here on a
-        // side-effect-free export so the first real user call is clean.
-        if (can("account")) {
-            runCatching { call("account", "{}", timeoutMs = 30_000) }
-        }
     }
 
     private fun stripNullArrayElements(element: kotlinx.serialization.json.JsonElement): kotlinx.serialization.json.JsonElement =
@@ -322,42 +360,81 @@ class PluginRuntime(
             else -> element
         }
 
-    suspend fun call(name: String, argsJson: String = "{}", timeoutMs: Long = 90_000): String {
-        // dokar alpha13's evaluate also surfaces plugin promise rejections it
-        // observes while draining jobs, and can occasionally abort the invoke
-        // evaluate itself. The authoritative result arrives through _deliver;
-        // if the evaluate threw, give delivery a short grace, then retry the
-        // invoke once (same call, same args).
-        var evaluateError: Exception? = null
+    /**
+     * A plugin result in both shapes: [stripped] has null array placeholders
+     * removed so model decoding survives partial upstream failures, while
+     * [raw] preserves the original array lengths — callers that page by
+     * element count must use [raw], or their offset drifts (see BUGS.md M14).
+     */
+    data class RawCallResult(val stripped: String, val raw: String)
+
+    /**
+     * Exports that are safe to re-invoke after an engine hiccup. Anything that
+     * mutates server state (`like`, `played`, `createPlaylist`, …) is absent on
+     * purpose: retrying those double-applied the user's action (BUGS.md M15).
+     */
+    private val retryableExports = setOf(
+        "account", "home", "browse", "search", "suggest",
+        "playlists", "playlist", "liked", "isLiked", "recent",
+        "album", "artist", "savedAlbums", "shows", "show",
+        "stations", "comments", "lyrics", "stream",
+    )
+
+    suspend fun call(name: String, argsJson: String = "{}", timeoutMs: Long = 90_000): String =
+        callWithRaw(name, argsJson, timeoutMs).stripped
+
+    suspend fun callWithRaw(
+        name: String,
+        argsJson: String = "{}",
+        timeoutMs: Long = 90_000,
+    ): RawCallResult {
+        check(!closed) { "插件已关闭" }
+        // quickjs-kt can surface a plugin promise rejection while draining jobs
+        // and abort the invoke evaluate itself. The authoritative result still
+        // arrives via _deliver, so give delivery a short grace, then retry once
+        // — but only for read-only exports.
+        val mayRetry = name in retryableExports
         var attempt = 0
         while (true) {
             attempt++
+            val id = nextCallId.incrementAndGet()
             val deferred = CompletableDeferred<String>()
-            pending = deferred
-            evaluateError = null
+            pendingCalls[id] = deferred
+            var evaluateError: Exception? = null
             try {
-                engine.evaluate<Any?>("__invoke(${jsStr(name)}, ${jsStr(argsJson)})", "invoke.js")
+                engineMutex.withLock {
+                    check(!closed) { "插件已关闭" }
+                    engine.evaluate<Any?>(
+                        "__invoke(${jsStr(name)}, ${jsStr(argsJson)}, $id)",
+                        "invoke.js",
+                    )
+                }
             } catch (e: Exception) {
                 evaluateError = e
             }
             val resultJson = try {
-                if (evaluateError != null && attempt == 1) {
+                if (evaluateError != null && mayRetry && attempt == 1) {
                     withTimeout(2_000) { deferred.await() }
                 } else {
                     withTimeout(timeoutMs) { deferred.await() }
                 }
             } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
-                if (evaluateError != null && attempt == 1) continue
+                if (evaluateError != null && mayRetry && attempt == 1) {
+                    pendingCalls.remove(id)
+                    continue
+                }
                 throw evaluateError ?: e
+            } finally {
+                pendingCalls.remove(id)
             }
             val st = pluginJson.parseToJsonElement(resultJson).jsonObject
             if (st["ok"]?.jsonPrimitive?.boolean == true) {
                 val raw = st["valueJson"]!!.jsonPrimitive.content
-                if (raw == "null") return raw
-                // Plugins can emit null placeholders inside arrays when an
-                // upstream subrequest failed; drop them so model decoding
-                // never crashes on a partial result.
-                return stripNullArrayElements(pluginJson.parseToJsonElement(raw)).toString()
+                if (raw == "null") return RawCallResult(raw, raw)
+                return RawCallResult(
+                    stripped = stripNullArrayElements(pluginJson.parseToJsonElement(raw)).toString(),
+                    raw = raw,
+                )
             }
             throw PluginCallException(
                 st["code"]?.let { if (it is JsonNull) null else it.jsonPrimitive.content },
@@ -366,8 +443,23 @@ class PluginRuntime(
         }
     }
 
+    /**
+     * Fail every in-flight call immediately, then tear the engine down behind
+     * the same mutex the evaluators hold, so `engine.close()` can never run
+     * underneath a live native evaluate.
+     */
     fun close() {
+        if (closed) return
+        closed = true
+        val cancelled = kotlinx.coroutines.CancellationException("插件已关闭")
+        pendingCalls.values.forEach { it.completeExceptionally(cancelled) }
+        pendingCalls.clear()
+        delays.values.forEach { it.cancel() }
+        delays.clear()
         scope.cancel()
-        runCatching { engine.close() }
+        // Deliberately not the cancelled `scope`: teardown must still run.
+        CoroutineScope(Dispatchers.Default).launch {
+            engineMutex.withLock { runCatching { engine.close() } }
+        }
     }
 }
