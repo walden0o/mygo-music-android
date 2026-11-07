@@ -12,6 +12,7 @@
 | | 改前 | 改后 |
 | --- | --- | --- |
 | UI 框架 | 原生 View 手工拼装 | **Jetpack Compose**（BOM 2024.12.01 / Compose 1.7.6） |
+| 构建 | AGP 8.5.2 / Gradle 8.10.2 / Kotlin 2.0.20 / compileSdk 34 | **AGP 8.13.0 / Gradle 8.13 / Kotlin 2.4.10 / compileSdk 36**（为 16 KB 页对齐的 quickjs 版本所需） |
 | 设计系统 | 无，硬编码颜色 | **Material 3**：完整 `ColorScheme` / `Typography` / `Shapes` |
 | 导航 | 自己维护的 View 栈 | 底部 `NavigationBar` + 页面栈（详情页隐藏底栏） |
 | 图片 | Coil `ImageView` | `coil-compose` `AsyncImage` + 占位/骨架 |
@@ -88,7 +89,27 @@ QuickJS 运行时或播放队列；所有插件调用仍在协程里走 `PluginR
   统一错误态 + 重试呈现；`每日推荐`、`喜欢`、歌词等需要登录后才有数据。
 - 应用内登录依赖插件 `signIn` 导出与扫码，纯桌面辅助进程插件（yt-dlp/ffmpeg/librespot）仍只能浏览与搜索。
 
-## 7. 构建与运行
+## 7. 16 KB 页大小对齐（Android 15+/16 安装警告）
+
+Android 16 起，安装含原生库的应用时，如果 `.so` 不是按 **16 KB 页**对齐，会弹出
+「此应用不符合 16 KB 对齐要求」的提示。
+
+- **根因**：`io.github.dokar3:quickjs-kt:1.0.0-alpha13` 的 `libquickjs.so` 是旧 NDK 构建，
+  ELF `LOAD` 段 `p_align = 0x1000`（4 KB）。`androidx.graphics.path.so` 本来就是 0x4000，没问题。
+- **修复**：升级 `quickjs-kt` → **1.0.10**（官方已改成 16 KB 对齐，`p_align = 0x4000`）。
+  该版本 AAR 要求 `minCompileSdk 36`、依赖 Kotlin 2.4 元数据，因此连带升级
+  AGP 8.5.2 → **8.13.0**、Gradle 8.10.2 → **8.13**、Kotlin 2.0.20 → **2.4.10**、compileSdk 34 → **36**
+  （`targetSdk` 保持 34，行为不变）。Kotlin 2.4 起 `jvmTarget` 必须走 `kotlin.compilerOptions` DSL，已同步改。
+- **验证**（全部通过）：
+  ```bash
+  # ELF 段对齐：全部 0x4000
+  readelf -lW lib/arm64-v8a/libquickjs.so | awk '/LOAD/{print $NF}' | sort -u
+  # APK 内 16 KB zip 对齐（build-tools 36）
+  zipalign -c -v -P 16 4 app/build/outputs/apk/debug/app-debug.apk   # Verification successful
+  ```
+  并在模拟器与实机（Android 17）安装运行，首页/搜索/播放均正常。
+
+## 8. 构建与运行
 
 ```bash
 # 需要 JDK 17 + Android SDK（compileSdk 34）

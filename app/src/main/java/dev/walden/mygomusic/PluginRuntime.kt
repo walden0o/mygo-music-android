@@ -159,7 +159,7 @@ class PluginRuntime(
     private val sourceCode: String,
     private val locales: Map<String, String>,
 ) {
-    private val engine: QuickJs = QuickJs.create(jobDispatcher = Dispatchers.Default)
+    private val engine: QuickJs = QuickJs.create(Dispatchers.Default)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val prefs = context.getSharedPreferences("plugin-${manifest.id}", Context.MODE_PRIVATE)
     private val dataDir = File(context.filesDir, "plugins/${manifest.id}").apply { mkdirs() }
