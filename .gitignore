@@ -16,6 +16,9 @@ plugins-src/
 # Harness runtime state
 harness/storage.json
 
+# Local verification screenshots
+screenshots/
+
 # IDE / OS
 .idea/
 *.iml

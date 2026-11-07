@@ -1,7 +1,12 @@
 package dev.walden.mygomusic
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.net.Uri
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
@@ -166,8 +171,36 @@ class PlaybackService : MediaSessionService() {
 
     override fun onCreate() {
         super.onCreate()
+        // Android 12+ requires startForeground() within ~5s of
+        // startForegroundService(); stream URLs can take longer than that to
+        // resolve, so post a preparation notification right away. Media3
+        // swaps in its own media notification once playback begins.
+        startPreparationForeground()
         session = MediaSession.Builder(this, Player.player(this)).build()
         addSession(session!!)
+    }
+
+    private fun startPreparationForeground() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val manager = getSystemService(NotificationManager::class.java)
+        val channelId = "playback"
+        if (manager.getNotificationChannel(channelId) == null) {
+            manager.createNotificationChannel(
+                NotificationChannel(channelId, "播放", NotificationManager.IMPORTANCE_LOW)
+            )
+        }
+        val contentIntent = PendingIntent.getActivity(
+            this, 0, Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        val notification = Notification.Builder(this, channelId)
+            .setSmallIcon(android.R.drawable.ic_media_play)
+            .setContentTitle("MyGo Music")
+            .setContentText("正在准备播放…")
+            .setContentIntent(contentIntent)
+            .setOngoing(true)
+            .build()
+        startForeground(1001, notification)
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = session

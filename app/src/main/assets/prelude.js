@@ -26,6 +26,49 @@ globalThis.setInterval = function (callback, timeout) {
 };
 globalThis.clearInterval = globalThis.clearTimeout;
 
+// ---- TextEncoder / TextDecoder (UTF-8) ---------------------------------------
+// Some plugins (e.g. the NetEase one) encode request bodies with TextEncoder;
+// QuickJS ships no web platform, so provide the UTF-8 pair here.
+if (typeof globalThis.TextEncoder === "undefined") {
+  globalThis.TextEncoder = class TextEncoder {
+    constructor() { this.encoding = "utf-8"; }
+    encode(input) {
+      const str = String(input == null ? "" : input);
+      const out = [];
+      for (let i = 0; i < str.length; i++) {
+        let cp = str.codePointAt(i);
+        if (cp > 0xFFFF) i++;
+        if (cp < 0x80) out.push(cp);
+        else if (cp < 0x800) out.push(0xC0 | (cp >> 6), 0x80 | (cp & 63));
+        else if (cp < 0x10000) out.push(0xE0 | (cp >> 12), 0x80 | ((cp >> 6) & 63), 0x80 | (cp & 63));
+        else out.push(0xF0 | (cp >> 18), 0x80 | ((cp >> 12) & 63), 0x80 | ((cp >> 6) & 63), 0x80 | (cp & 63));
+      }
+      return new Uint8Array(out);
+    }
+  };
+}
+if (typeof globalThis.TextDecoder === "undefined") {
+  globalThis.TextDecoder = class TextDecoder {
+    constructor(encoding) { this.encoding = encoding || "utf-8"; }
+    decode(buf) {
+      if (!buf) return "";
+      const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+      let out = "";
+      let i = 0;
+      while (i < bytes.length) {
+        const b0 = bytes[i++];
+        let cp;
+        if (b0 < 0x80) cp = b0;
+        else if (b0 < 0xE0) cp = ((b0 & 31) << 6) | (bytes[i++] & 63);
+        else if (b0 < 0xF0) cp = ((b0 & 15) << 12) | ((bytes[i++] & 63) << 6) | (bytes[i++] & 63);
+        else cp = ((b0 & 7) << 18) | ((bytes[i++] & 63) << 12) | ((bytes[i++] & 63) << 6) | (bytes[i++] & 63);
+        out += String.fromCodePoint(cp);
+      }
+      return out;
+    }
+  };
+}
+
 // ---- AbortController ----------------------------------------------------------
 globalThis.AbortController = class AbortController {
   constructor() {

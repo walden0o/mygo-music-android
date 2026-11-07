@@ -8,6 +8,21 @@ host API (`host.storage`, `host.crypto`, `host.signInPrompt`, `fetch`,
 timers, … — full contract in [HOST_SPEC.md](HOST_SPEC.md)), and runs the
 official plugins **unmodified**.
 
+## UI
+
+The interface is Jetpack Compose + Material 3, reworked to follow the desktop
+app's visual language (near-black canvas, a single warm-red accent, hairline
+grid, cover-driven headers) while respecting Android's navigation patterns:
+bottom navigation, mini player, full-screen now playing with artwork/lyrics
+pages, and a bottom-sheet for plugin switching, settings and sign-in.
+
+- Dark / light / follow-system themes, plus dynamic color on Android 12+
+- Design tokens and the mapping from MyGo's desktop UI: see
+  [REDESIGN.md](REDESIGN.md) and [DESIGN_SPEC.md](DESIGN_SPEC.md)
+- UI source lives under `app/src/main/java/dev/walden/mygomusic/ui/`
+  (`AppState.kt` is the single state holder, `ui/screens/` the pages,
+  `ui/sheets/` the sheets, `ui/theme/` the design system)
+
 ## Features (MVP)
 
 - QR-code sign-in (prompts rendered from `host.signInPrompt`)

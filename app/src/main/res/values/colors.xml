@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- MyGo's canvas, shown behind the Compose surface during launch. -->
+    <color name="launch_background">#141416</color>
+    <color name="ic_launcher_background">#E2333C</color>
+</resources>
