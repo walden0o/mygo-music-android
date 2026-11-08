@@ -84,11 +84,17 @@ private fun SheetTitle(title: String, subtitle: String? = null) {
 
 @Composable
 fun PluginsSheet(state: MyGoState) {
+    // Two bundled NetEase variants both call themselves "网易云音乐" but only one
+    // still speaks the current API. Disambiguate colliding names with the id so
+    // the user can actually tell the rows apart.
+    val duplicated = state.catalog.groupBy { it.name }.filterValues { it.size > 1 }.keys
     Column(Modifier.fillMaxWidth()) {
         SheetTitle("插件", "已安装 ${state.catalog.size} 个 · 点选切换音源")
         LazyColumn(Modifier.heightIn(max = 520.dp)) {
             items(state.catalog, key = { it.id }) { plugin ->
                 val active = state.manifest?.id == plugin.id
+                val displayName =
+                    if (plugin.name in duplicated) "${plugin.name} · ${plugin.id}" else plugin.name
                 Row(
                     Modifier
                         .fillMaxWidth()
@@ -118,7 +124,7 @@ fun PluginsSheet(state: MyGoState) {
                     Spacer(Modifier.width(14.dp))
                     Column(Modifier.weight(1f)) {
                         Text(
-                            plugin.name,
+                            displayName,
                             style = MaterialTheme.typography.bodyLarge,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,

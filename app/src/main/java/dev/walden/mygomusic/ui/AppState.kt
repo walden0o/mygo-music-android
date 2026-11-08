@@ -185,10 +185,20 @@ class MyGoState private constructor(private val app: Context) {
     }
 
     /** Plugins that work out of the box come first in the switcher. */
+    /**
+     * Order the switcher by *verified API health*, not just "needs no setup".
+     *
+     * Checked end-to-end against the live services with the JVM harness:
+     *  - `netease` / `netease-cloud-music`: search, suggest, playlist hydration,
+     *    lyrics and home all pass (lyrics use `/api/song/lyric/v1`).
+     *  - `netease-music` v0.4.0: search AND lyrics fail — it still calls the
+     *    retired `/api/song/lyric` and `/api/cloudsearch/pc`, which answer
+     *    "wrong parmas" / "参数错误". It must not be the default.
+     */
     private fun preferredRank(id: String): Int {
         val order = listOf(
-            "netease-music", "kugou", "bilibili", "youtube-music",
-            "netease", "netease-cloud-music", "qqmusic", "lizhi",
+            "netease", "netease-cloud-music", "kugou", "bilibili",
+            "youtube-music", "qqmusic", "lizhi", "netease-music",
         )
         val index = order.indexOf(id)
         return if (index >= 0) index else order.size
@@ -312,7 +322,20 @@ class MyGoState private constructor(private val app: Context) {
         Player.onUiUpdate = { main.post { refreshPlayer() } }
         Player.onError = { text -> main.post { message = text } }
         catalog = PluginCatalog.listBundled(app).sortedBy { preferredRank(it.id) }
-        val saved = prefs.getString("plugin", null)
+        // One-time migration: earlier builds defaulted to `netease-music`, whose
+        // search/lyrics endpoints are retired. Users never chose it deliberately,
+        // so move them once to a working source. Runs only once, so a later
+        // explicit switch back is respected.
+        val saved = if (!prefs.getBoolean("defaultSourceMigrated", false)) {
+            prefs.edit().putBoolean("defaultSourceMigrated", true).apply()
+            val previous = prefs.getString("plugin", null)
+            if (previous == "netease-music") {
+                prefs.edit().putString("plugin", "netease").apply()
+                "netease"
+            } else previous
+        } else {
+            prefs.getString("plugin", null)
+        }
         val initial = catalog.firstOrNull { it.id == saved } ?: catalog.firstOrNull()
         if (initial != null) activate(initial)
     }
@@ -459,6 +482,11 @@ class MyGoState private constructor(private val app: Context) {
 
     private fun errorText(e: Throwable): String = when {
         e is PluginCallException && e.message?.contains("not exported") == true -> "此插件不支持该功能"
+        // Some bundled variants still call retired service endpoints and get
+        // back "wrong parmas" / "参数错误". That is the plugin being out of date,
+        // not the user's input — point them at a working source.
+        e is PluginCallException && isStaleEndpointError(e.message) ->
+            "该插件的接口已失效（${e.message}），请切换到其他音源"
         e is PluginCallException -> e.message ?: "调用失败"
         // Decode failures used to surface the raw English serializer message
         // (M16); give the user something actionable instead.
@@ -466,6 +494,12 @@ class MyGoState private constructor(private val app: Context) {
         e.message?.contains("Timed out") == true -> "加载超时，请检查网络后重试"
         e.message?.contains("插件已关闭") == true || e is CancellationException -> "插件已切换"
         else -> e.message ?: "出错了"
+    }
+
+    private fun isStaleEndpointError(message: String?): Boolean {
+        val m = message?.lowercase() ?: return false
+        return m.contains("wrong parmas") || m.contains("wrong params") ||
+            m.contains("参数错误") || m.contains("illegal params")
     }
 
     fun toast(text: String) {

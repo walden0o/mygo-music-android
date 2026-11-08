@@ -605,3 +605,36 @@ MEDIA_NEXT 留在歌词页 → 曲目切换且歌词自动重载成新歌的中�
 - **H3 队列计数上报**：需 `setMediaItems` 重构，另开。
 - **harness 大 JSON 截断**：bilibili 的 search/home 返回体较大时 harness 侧 `JsonDecodingException: Unexpected EOF`；
   app 端同样数据正常，属 harness 工具限制，另开。
+
+---
+
+# 追加修复：默认音源用了接口已失效的变体（2026-11-08 用户反馈）
+
+## 现象
+用户实机歌词页报 `/api/song/lyric wrong parmas`。
+
+## 根因（是我之前的失误）
+早先为了「开箱可用」，我按「无需填写配置」把 `netease-music` 排为默认音源，**没有验证其接口是否还有效**。
+用 harness 打真实服务后对照三个网易云变体：
+
+| 插件 | 版本 | lyrics 端点 | harness 结果 |
+| --- | --- | --- | --- |
+| `netease` | 1.0.0 | `/api/song/lyric/v1` | **8 passed / 1 failed**（失败仅因服务端 VIP 限制）；search/suggest/lyrics/歌单 hydration 全通过 |
+| `netease-cloud-music` | 0.1.8 | `/v1` + `/api/song/lyric` 兜底 | **8 passed / 1 failed**（同上） |
+| `netease-music` | 0.4.0 | 只有已退役的 `/api/song/lyric` | **4 passed / 5 failed**：lyrics `wrong parmas`、search `/api/cloudsearch/pc：参数错误`、suggest/search/get 均参数错误 |
+
+即 `netease-music` v0.4.0 仍在调用已退役端点，属**插件侧过期**，宿主无过错——但把它设成默认是我的选择错误。
+
+## 修复
+1. **`preferredRank` 改按「实测接口健康度」排序**：`netease` → `netease-cloud-music` → `kugou` → `bilibili` → `youtube-music` → `qqmusic` → `lizhi` → `netease-music`（末位）。
+2. **一次性迁移**：旧版把 `netease-music` 写进了 prefs，用户并非主动选择。新增 `defaultSourceMigrated` 标志，仅首次启动把 `netease-music` 迁到 `netease`；之后再手动切回去会被尊重，不会反复覆盖。
+3. **错误文案可操作化**：`errorText` 识别 `wrong parmas` / `wrong params` / `参数错误` / `illegal params`，提示「该插件的接口已失效（…），请切换到其他音源」，而不是抛原始英文。
+4. **插件重名消歧**：`netease` 与 `netease-music` 的 `plugin.json` **都叫「网易云音乐」**，切换器里根本分不出。现在重名时标题追加 id → 「网易云音乐 · netease」/「网易云音乐 · netease-music」。
+
+## 验证
+- 模拟器模拟旧安装（prefs=`netease-music`、无迁移标志）→ 启动后 prefs 变为 `netease`，标志置位 ✅
+- 切换器实测显示「网易云音乐 · netease」✅
+- `netease` 音源实机播放 `PLAYING(3)`，歌词页正常出词
+  （截图 `screenshots/FIXED-netease-lyrics.png`；歌词区亮像素 8.21%，与已知有词截图 7.06% 同量级。
+   注：uiautomator 对 Compose 懒列表存在节点不暴露的情况，故以像素密度佐证。）
+- 已装到用户手机并把音源切到 `netease`，零崩溃零超时。
