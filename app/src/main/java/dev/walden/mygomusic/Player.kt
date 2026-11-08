@@ -42,7 +42,7 @@ import androidx.media3.common.Player as Media3Player
  */
 object Player {
     private var exo: ExoPlayer? = null
-    private lateinit var httpFactory: DefaultHttpDataSource.Factory
+    private lateinit var httpFactory: androidx.media3.datasource.okhttp.OkHttpDataSource.Factory
     private var serviceStarted = false
 
     /**
@@ -76,17 +76,26 @@ object Player {
     fun player(context: Context): ExoPlayer {
         exo?.let { return it }
         val app = context.applicationContext
-        httpFactory = DefaultHttpDataSource.Factory()
+        // OkHttp as the wire: HttpURLConnection (DefaultHttpDataSource) was observed to
+        // drop the Referer header that bilibili's CDN requires (everything got 403), while
+        // the identical headers via OkHttp return 206. OkHttpDataSource honors
+        // DataSpec.httpRequestHeaders the same way, so the per-item resolver is unchanged.
+        val okhttpClient = okhttp3.OkHttpClient.Builder()
+            .connectTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+            .followRedirects(true)
+            .followSslRedirects(true)
+            // cross-protocol redirects (http<->https) are what
+            // setAllowCrossProtocolRedirects(true) allowed before
+            .build()
+        val okhttpFactory = androidx.media3.datasource.okhttp.OkHttpDataSource.Factory(okhttpClient)
             // Keep the browser-like UA: several CDNs (NetEase in particular)
             // serve an error page instead of audio to non-browser agents,
             // which surfaces as UnrecognizedInputFormatException.
             .setUserAgent("Mozilla/5.0 (Linux; Android) MyGoMusic")
-            .setConnectTimeoutMs(20_000)
-            .setReadTimeoutMs(30_000)
-            .setAllowCrossProtocolRedirects(true)
         // H2: resolve per-item headers from the DataSpec (keyed by stream URL). No global mutation.
         val resolvingFactory = ResolvingDataSource.Factory(
-            httpFactory,
+            okhttpFactory,
             ResolvingDataSource.Resolver { dataSpec ->
                 val headers = streamHeaders[dataSpec.uri.toString()]
                 if (headers.isNullOrEmpty()) dataSpec
@@ -182,6 +191,7 @@ object Player {
                     // H2: per-item headers keyed by this exact URL (bounded; no cross-track leak).
                     streamHeaders.keys.retainAll(setOf(stream.url))
                     if (stream.headers.isNotEmpty()) streamHeaders[stream.url] = stream.headers
+                    android.util.Log.d("MyGoPlay", "resolved url=${stream.url.take(100)} headers=${stream.headers.keys}")
                 } catch (e: Exception) {
                     // C1/M10: a cancelled resolve (new track, plugin switch, runtime closed) is NOT
                     // a track failure — never count it, surface it, or auto-advance on it.
