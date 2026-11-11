@@ -13,10 +13,10 @@ import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
-import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.ResolvingDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import kotlinx.coroutines.CancellationException
@@ -42,7 +42,6 @@ import androidx.media3.common.Player as Media3Player
  */
 object Player {
     private var exo: ExoPlayer? = null
-    private lateinit var httpFactory: androidx.media3.datasource.okhttp.OkHttpDataSource.Factory
     private var serviceStarted = false
 
     /**
@@ -152,6 +151,28 @@ object Player {
         playAt(context, startIndex.coerceIn(tracks.indices))
     }
 
+    /**
+     * C2: stop and forget the current queue. Called when the active plugin
+     * changes — otherwise the next/auto-advance would resolve an old plugin's
+     * track id through the new runtime.
+     */
+    fun reset() {
+        resolveJob?.cancel()
+        resolveJob = null
+        queue = emptyList()
+        index = -1
+        current = null
+        consecutiveFailures = 0
+        streamHeaders.clear()
+        exo?.let { p ->
+            runCatching {
+                p.stop()
+                p.clearMediaItems()
+            }
+        }
+        onUiUpdate?.invoke()
+    }
+
     fun playAt(context: Context, at: Int) {
         if (at !in queue.indices) return
         val app = context.applicationContext
@@ -191,7 +212,8 @@ object Player {
                     // H2: per-item headers keyed by this exact URL (bounded; no cross-track leak).
                     streamHeaders.keys.retainAll(setOf(stream.url))
                     if (stream.headers.isNotEmpty()) streamHeaders[stream.url] = stream.headers
-                    android.util.Log.d("MyGoPlay", "resolved url=${stream.url.take(100)} headers=${stream.headers.keys}")
+                    // S4: never log the resolved URL/headers — stream URLs carry
+                    // signed tokens and header names reveal the auth scheme.
                 } catch (e: Exception) {
                     // C1/M10: a cancelled resolve (new track, plugin switch, runtime closed) is NOT
                     // a track failure — never count it, surface it, or auto-advance on it.
@@ -317,6 +339,7 @@ object Player {
  * ExoPlayer while overriding only commands / availability / seek avoids that. The session re-reads
  * getAvailableCommands() on every playback-state rebuild, so end-of-queue availability stays correct.
  */
+@UnstableApi
 private class QueueForwardingPlayer(
     private val app: Context,
     player: ExoPlayer,
@@ -349,6 +372,7 @@ private class QueueForwardingPlayer(
 }
 
 /** Media3 session service: keeps playback alive and exposes the media session. */
+@UnstableApi
 class PlaybackService : MediaSessionService() {
     private var session: MediaSession? = null
 
