@@ -69,6 +69,50 @@ if (typeof globalThis.TextDecoder === "undefined") {
   };
 }
 
+// ---- btoa / atob (base64, Latin-1 binary strings) ------------------------------
+// The Kugou plugins base64-encode device-registration parameters with btoa and
+// decode base64 lyrics payloads with atob; QuickJS ships neither.
+if (typeof globalThis.btoa === "undefined") {
+  const __b64chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  globalThis.btoa = function (input) {
+    const str = String(input);
+    let out = "";
+    for (let i = 0; i < str.length; i += 3) {
+      const hasB = i + 1 < str.length, hasC = i + 2 < str.length;
+      const a = str.charCodeAt(i), b = hasB ? str.charCodeAt(i + 1) : 0, c = hasC ? str.charCodeAt(i + 2) : 0;
+      if (a > 255 || b > 255 || c > 255) {
+        throw new Error("InvalidCharacterError: btoa input has characters outside the Latin-1 range");
+      }
+      const n = (a << 16) | (b << 8) | c;
+      out += __b64chars[(n >> 18) & 63] + __b64chars[(n >> 12) & 63] +
+        (hasB ? __b64chars[(n >> 6) & 63] : "=") + (hasC ? __b64chars[n & 63] : "=");
+    }
+    return out;
+  };
+  globalThis.atob = function (input) {
+    const cleaned = String(input).replace(/[\t\n\f\r ]/g, "");
+    if (cleaned.length % 4 === 1 || /[^A-Za-z0-9+/=]/.test(cleaned)) {
+      throw new Error("InvalidCharacterError: malformed base64 input to atob");
+    }
+    const str = cleaned + "===".slice(0, (4 - (cleaned.length % 4)) % 4);
+    let out = "";
+    let chunk = [];
+    for (let i = 0; i < str.length; i += 4) {
+      const pad2 = str[i + 2] === "=", pad3 = str[i + 3] === "=";
+      const n = (__b64chars.indexOf(str[i]) << 18) |
+        (__b64chars.indexOf(str[i + 1]) << 12) |
+        ((pad2 ? 0 : __b64chars.indexOf(str[i + 2])) << 6) |
+        (pad3 ? 0 : __b64chars.indexOf(str[i + 3]));
+      chunk.push((n >> 16) & 255);
+      if (!pad2) chunk.push((n >> 8) & 255);
+      if (!pad3) chunk.push(n & 255);
+      if (chunk.length >= 32768) { out += String.fromCharCode.apply(null, chunk); chunk = []; }
+    }
+    if (chunk.length) out += String.fromCharCode.apply(null, chunk);
+    return out;
+  };
+}
+
 // ---- AbortController ----------------------------------------------------------
 globalThis.AbortController = class AbortController {
   constructor() {
@@ -217,6 +261,18 @@ globalThis.fetch = async function (url, options) {
     headers: headersObj,
     json: function () { return JSON.parse(res.body); },
     text: function () { return res.body; },
+    // Kugou's device registration AES-decrypts the raw response body, and
+    // download-music/qqmusic read binary payloads too. The native side sends
+    // bodyBase64 alongside the text body for exactly this.
+    arrayBuffer: function () {
+      if (typeof res.bodyBase64 === "string") {
+        const bin = atob(res.bodyBase64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        return bytes.buffer;
+      }
+      return new TextEncoder().encode(res.body).buffer;
+    },
   };
 };
 
@@ -261,15 +317,36 @@ globalThis.host = {
 // The id is echoed back so the host can route each result to its own caller.
 // Without it, concurrent calls shared one delivery slot and stole each other's
 // results (see BUGS.md C1).
+//
+// The QuickJS<->Kotlin bridge corrupts astral characters (emoji — valid
+// UTF-16 surrogate pairs) in strings delivered to the host: results came back
+// mangled/truncated and failed to parse on the Kotlin side (bisected with a
+// synthetic plugin, 2026-11-11: a 35 KB ASCII result passes, a 1.6 KB result
+// containing emoji fails). Escape every code unit outside printable ASCII to
+// \uXXXX in the delivery envelope. The envelope is JSON whose non-ASCII
+// characters only ever occur inside string literals, so the host parser
+// restores the exact original text while the wire form stays pure ASCII.
+function __deliverSafe(callId, envelopeJson) {
+  _deliver(callId, envelopeJson.replace(/[\u007F-\uFFFF]/g, function (c) {
+    return "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0");
+  }));
+}
 globalThis.__invoke = function (name, argsJson, callId) {
+  // Synthetic, side-effect-free warm-up used once after module load to absorb
+  // the engine's first-result hiccup without hitting a plugin export (the old
+  // warm-up called `account`, which is a network call and delayed readiness).
+  if (name === "__warmup") {
+    __deliverSafe(callId, JSON.stringify({ ok: true, valueJson: "null" }));
+    return;
+  }
   (async function () {
     try {
       const fn = __exports[name];
       if (typeof fn !== "function") throw new Error("plugin has no export " + name);
       const v = await fn(JSON.parse(argsJson));
-      _deliver(callId, JSON.stringify({ ok: true, valueJson: JSON.stringify(v === undefined ? null : v) }));
+      __deliverSafe(callId, JSON.stringify({ ok: true, valueJson: JSON.stringify(v === undefined ? null : v) }));
     } catch (e) {
-      _deliver(callId, JSON.stringify({
+      __deliverSafe(callId, JSON.stringify({
         ok: false,
         error: String((e && e.message) || e),
         code: (e && e.code) || null,
