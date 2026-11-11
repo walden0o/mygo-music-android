@@ -274,6 +274,9 @@ class MyGoState private constructor(private val app: Context) {
         private set
     var likedLoadingMore by mutableStateOf(false)
         private set
+    // M14/C5: consumed offsets must come from the RAW (pre-null-strip) arrays.
+    private var likedOffset = 0
+    private val showOffsets = mutableMapOf<String, Int>()
     var showLoadingMore by mutableStateOf(false)
         private set
     var recent by mutableStateOf<Load<List<Track>>>(Load.Idle)
@@ -321,23 +324,34 @@ class MyGoState private constructor(private val app: Context) {
     init {
         Player.onUiUpdate = { main.post { refreshPlayer() } }
         Player.onError = { text -> main.post { message = text } }
-        catalog = PluginCatalog.listBundled(app).sortedBy { preferredRank(it.id) }
-        // One-time migration: earlier builds defaulted to `netease-music`, whose
-        // search/lyrics endpoints are retired. Users never chose it deliberately,
-        // so move them once to a working source. Runs only once, so a later
-        // explicit switch back is respected.
-        val saved = if (!prefs.getBoolean("defaultSourceMigrated", false)) {
-            prefs.edit().putBoolean("defaultSourceMigrated", true).apply()
-            val previous = prefs.getString("plugin", null)
-            if (previous == "netease-music") {
-                prefs.edit().putString("plugin", "netease").apply()
-                "netease"
-            } else previous
-        } else {
-            prefs.getString("plugin", null)
+        // C3: reading every plugin's JS (~1.1 MB of assets) just to classify
+        // partial support must not run on the main thread during onCreate.
+        scope.launch {
+            catalog = withContext(Dispatchers.IO) {
+                PluginCatalog.listBundled(app).sortedBy { preferredRank(it.id) }
+            }
+            // One-time migration: earlier builds defaulted to `netease-music`, whose
+            // search/lyrics endpoints are retired. Users never chose it deliberately,
+            // so move them once to a working source. Runs only once, so a later
+            // explicit switch back is respected.
+            val saved = if (!prefs.getBoolean("defaultSourceMigrated", false)) {
+                prefs.edit().putBoolean("defaultSourceMigrated", true).apply()
+                val previous = prefs.getString("plugin", null)
+                if (previous == "netease-music") {
+                    prefs.edit().putString("plugin", "netease").apply()
+                    "netease"
+                } else previous
+            } else {
+                prefs.getString("plugin", null)
+            }
+            val initial = catalog.firstOrNull { it.id == saved } ?: catalog.firstOrNull()
+            if (initial != null) {
+                activate(initial)
+            } else {
+                // C14: never leave the UI on an endless loading screen.
+                pluginError = "没有可用的插件"
+            }
         }
-        val initial = catalog.firstOrNull { it.id == saved } ?: catalog.firstOrNull()
-        if (initial != null) activate(initial)
     }
 
     // -- plugin lifecycle -------------------------------------------------
@@ -358,6 +372,8 @@ class MyGoState private constructor(private val app: Context) {
         loaderJobs.clear()
         likedLoadingMore = false
         showLoadingMore = false
+        likedOffset = 0
+        showOffsets.clear()
         searchLoadingMore = false
         currentLiked = false
         lastSeenTrackId = null
@@ -404,13 +420,21 @@ class MyGoState private constructor(private val app: Context) {
                 val fresh = PluginRuntime(app, plugin, source.first, source.second)
                 rt = fresh
                 fresh.onOpenURL = { url ->
-                    main.post {
-                        runCatching {
-                            val intent = android.content.Intent(
-                                android.content.Intent.ACTION_VIEW,
-                                android.net.Uri.parse(url)
-                            ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-                            app.startActivity(intent)
+                    // S3: plugins may only open web pages. Forwarding arbitrary
+                    // schemes let a plugin launch any installed app's deep link
+                    // (tel:, sms:, custom schemes) or a file/content URI.
+                    val scheme = runCatching {
+                        android.net.Uri.parse(url).scheme?.lowercase()
+                    }.getOrNull()
+                    if (scheme == "http" || scheme == "https") {
+                        main.post {
+                            runCatching {
+                                val intent = android.content.Intent(
+                                    android.content.Intent.ACTION_VIEW,
+                                    android.net.Uri.parse(url)
+                                ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                                app.startActivity(intent)
+                            }
                         }
                     }
                 }
@@ -424,6 +448,8 @@ class MyGoState private constructor(private val app: Context) {
                 runtime?.close()
                 runtime = fresh
                 Player.runtime = fresh
+                // C2: the old plugin's queue must not be resolved by the new one.
+                Player.reset()
                 manifest = plugin
                 prefs.edit().putString("plugin", plugin.id).apply()
                 pluginReady = true
@@ -516,9 +542,13 @@ class MyGoState private constructor(private val app: Context) {
         if (!can("account")) return
         val gen = generation
         launchLoader {
-            val acc = runCatching {
+            val acc = try {
                 decodeOrNull(call("account", "{}"), Account.serializer())
-            }.getOrNull()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
+            }
             if (gen == generation) account = acc
         }
     }
@@ -744,7 +774,11 @@ class MyGoState private constructor(private val app: Context) {
                     decodeOrNull(
                         call(
                             "browse",
-                            buildJsonObject { if (path.isNotBlank()) put("page", path) }.toString(),
+                            // Always send `page` ("" for the root): the contract is
+                            // browse({page}) and plugins destructure it and call
+                            // page.startsWith(...) — omitting the key crashed the
+                            // Kugou/Navidrome browse root with "startsWith of undefined".
+                            buildJsonObject { put("page", path) }.toString(),
                         ),
                         BrowsePage.serializer(),
                     ) ?: BrowsePage()
@@ -793,15 +827,23 @@ class MyGoState private constructor(private val app: Context) {
         if (!reset && likedLoadingMore) return
         val gen = generation
         val existing = liked.readyOrNull()
-        val offset = if (reset || existing == null) 0 else existing.tracks.size
-        if (reset || existing == null) liked = Load.Loading else likedLoadingMore = true
+        val offset = if (reset || existing == null) 0 else likedOffset
+        if (reset || existing == null) {
+            likedOffset = 0
+            liked = Load.Loading
+        } else {
+            likedLoadingMore = true
+        }
         launchLoader {
             try {
-                val page = decodeOrNull(
-                    call("liked", buildJsonObject { put("offset", offset) }.toString()),
-                    TrackPage.serializer(),
-                ) ?: TrackPage()
+                // M14/C5: page by the raw array length, not the null-stripped one.
+                val raw = callRaw("liked", buildJsonObject { put("offset", offset) }.toString())
+                val page = decodeOrNull(raw.stripped, TrackPage.serializer()) ?: TrackPage()
+                val consumed = runCatching {
+                    pluginJson.parseToJsonElement(raw.raw).jsonObject["tracks"]?.jsonArray?.size
+                }.getOrNull() ?: page.tracks.size
                 if (gen == generation) {
+                    likedOffset = offset + consumed
                     val base = if (reset) null else liked.readyOrNull()
                     liked = Load.Ready(
                         if (base == null) page else TrackPage(base.tracks + page.tracks, page.more)
@@ -929,15 +971,26 @@ class MyGoState private constructor(private val app: Context) {
         if (!reset && showLoadingMore) return
         val gen = generation
         val existing = showDetails[id].readyOrNull()
-        val offset = if (reset || existing == null) 0 else existing.episodes.size
-        if (reset || existing == null) showDetails[id] = Load.Loading else showLoadingMore = true
+        val offset = if (reset || existing == null) 0 else (showOffsets[id] ?: existing.episodes.size)
+        if (reset || existing == null) {
+            showOffsets[id] = 0
+            showDetails[id] = Load.Loading
+        } else {
+            showLoadingMore = true
+        }
         launchLoader {
             try {
-                val page = decodeOrNull(
-                    call("show", buildJsonObject { put("id", id); put("offset", offset) }.toString()),
-                    ShowPageResult.serializer(),
-                ) ?: ShowPageResult()
+                // M14/C5: page by the raw episode count, not the stripped one.
+                val raw = callRaw(
+                    "show",
+                    buildJsonObject { put("id", id); put("offset", offset) }.toString(),
+                )
+                val page = decodeOrNull(raw.stripped, ShowPageResult.serializer()) ?: ShowPageResult()
+                val consumed = runCatching {
+                    pluginJson.parseToJsonElement(raw.raw).jsonObject["episodes"]?.jsonArray?.size
+                }.getOrNull() ?: page.episodes.size
                 if (gen == generation) {
+                    showOffsets[id] = offset + consumed
                     val base = if (reset) null else showDetails[id].readyOrNull()
                     showDetails[id] = Load.Ready(
                         if (base == null) page else page.copy(episodes = base.episodes + page.episodes)

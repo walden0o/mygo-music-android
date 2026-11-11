@@ -64,13 +64,16 @@ fun HomeScreen(state: MyGoState) {
     LaunchedEffect(Unit) { state.loadHome() }
     val home = state.home
     val ready = home.readyOrNull()
+    // C7: capture once; pluginError is a mutable state and can be cleared
+    // between the null check and the composition of the error row.
+    val pluginError = state.pluginError
 
     LazyColumn(Modifier.fillMaxSize()) {
-        if (state.pluginError != null && ready == null) {
+        if (pluginError != null && ready == null) {
             item { Spacer(Modifier.height(60.dp)) }
             item {
                 ErrorState(
-                    state.pluginError!!,
+                    pluginError,
                     onRetry = { state.manifest?.let { state.activate(it) } },
                 )
             }
@@ -224,7 +227,7 @@ fun BrowseRouteScreen(state: MyGoState) {
             )
         }
         if (navPages.isNotEmpty()) {
-            items(navPages, key = { it.second.toString() }) { (title, route, _) ->
+            itemsIndexed(navPages, key = { index, item -> "$index-${item.second}" }) { _, (title, route, _) ->
                 NavigateRow(
                     title = title,
                     leadingIcon = Icons.Rounded.Album,
@@ -261,7 +264,7 @@ private fun NavEntriesScreen(state: MyGoState) {
         if (pages.isEmpty()) {
             item { EmptyState("这个音源没有可浏览的页面", "试试搜索，或换一个音源") }
         } else {
-            items(pages, key = { it.page ?: it.title ?: "" }) { nav ->
+            itemsIndexed(pages, key = { index, nav -> "$index-${nav.page ?: nav.title ?: ""}" }) { _, nav ->
                 NavigateRow(
                     title = nav.title ?: nav.page ?: "页面",
                     leadingIcon = Icons.Rounded.Album,
