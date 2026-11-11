@@ -62,6 +62,16 @@ android {
     }
     buildFeatures {
         compose = true
+        // Needed for BuildConfig.DEBUG guards (e.g. plugin console logging).
+        buildConfig = true
+    }
+    lint {
+        // The app is built on Media3's @UnstableApi session surface by design
+        // (MediaSession / ForwardingPlayer have no stable equivalent). The two
+        // declarations that expose unstable types in their signatures
+        // (QueueForwardingPlayer, PlaybackService) are marked @UnstableApi;
+        // the call-site opt-in check otherwise cascades into every UI file.
+        disable += "UnsafeOptInUsageError"
     }
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
