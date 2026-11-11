@@ -69,6 +69,7 @@ fun RouteScreen(state: MyGoState, route: Route) {
         is Route.ArtistDetail -> ArtistDetailScreen(state, route)
         is Route.ShowDetail -> ShowDetailScreen(state, route)
         is Route.Page -> BrowsePageScreen(state, route.path)
+        is Route.SectionAll -> SectionAllScreen(state)
         Route.Liked -> LikedScreen(state)
         Route.Recent -> RecentScreen(state)
         Route.Playlists -> PlaylistsScreen(state)

@@ -18,6 +18,7 @@ import dev.walden.mygomusic.LinkItem
 import dev.walden.mygomusic.Lyrics
 import dev.walden.mygomusic.Player
 import dev.walden.mygomusic.Playlist
+import dev.walden.mygomusic.Section
 import dev.walden.mygomusic.PluginCallException
 import dev.walden.mygomusic.PluginCatalog
 import dev.walden.mygomusic.PluginManifest
@@ -84,6 +85,9 @@ sealed interface Route {
     }
 
     data class Page(val path: String, override val title: String) : Route
+
+    /** A home/browse section shown in full, from data already loaded (no plugin call). */
+    data class SectionAll(override val title: String) : Route
 
     data object Playlists : Route {
         override val title = "我的歌单"
@@ -262,6 +266,10 @@ class MyGoState private constructor(private val app: Context) {
     // -- page data --------------------------------------------------------
 
     var home by mutableStateOf<Load<BrowsePage>>(Load.Idle)
+        private set
+
+    /** Section snapshot behind the current Route.SectionAll, if any. */
+    var sectionAll by mutableStateOf<Section?>(null)
         private set
     val pages = mutableStateMapOf<String, Load<BrowsePage>>()
     val playlistDetails = mutableStateMapOf<String, Load<Playlist>>()
@@ -652,6 +660,7 @@ class MyGoState private constructor(private val app: Context) {
             is Route.ArtistDetail -> loadArtist(route.id)
             is Route.ShowDetail -> loadShow(route.id, reset = true)
             is Route.Page -> loadPage(route.path)
+            is Route.SectionAll -> Unit
             Route.Liked -> loadLiked(reset = true)
             Route.Recent -> loadRecent()
             Route.Playlists -> loadLibrary(force = true)
@@ -689,6 +698,12 @@ class MyGoState private constructor(private val app: Context) {
 
     fun openPage(link: LinkItem) =
         push(Route.Page(link.page, link.title))
+
+    /** "更多" for sections the plugin gives no morePage for: show the loaded items as a grid page. */
+    fun openSectionAll(section: Section) {
+        sectionAll = section
+        push(Route.SectionAll(section.pageTitle ?: section.title ?: ""))
+    }
 
     fun openPluginSettings(m: PluginManifest) {
         sheet = Sheet.PluginSettings(m)
