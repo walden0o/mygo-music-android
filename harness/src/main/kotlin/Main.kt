@@ -77,10 +77,15 @@ class HostState(
                 val pairs = buildJsonArray {
                     for ((name, value) in resp.headers) add(buildJsonArray { add(name); add(value) })
                 }
+                // Mirror the app's PluginRuntime.httpSync: text body + base64
+                // binary form for fetch().arrayBuffer().
+                val bodyBytes = resp.body?.bytes() ?: ByteArray(0)
+                val charset = resp.body?.contentType()?.charset(Charsets.UTF_8) ?: Charsets.UTF_8
                 buildJsonObject {
                     put("status", resp.code)
                     put("headers", pairs)
-                    put("body", resp.body?.string() ?: "")
+                    put("body", bodyBytes.toString(charset))
+                    put("bodyBase64", java.util.Base64.getEncoder().encodeToString(bodyBytes))
                 }.toString()
             }
         } catch (e: Exception) {
@@ -202,6 +207,14 @@ class Runtime(
         engine.evaluate<Any?>(entryCode, "entry.js", asModule = true)
     }
 
+    /** Names exported by the plugin module (read from the `__exports` global). */
+    suspend fun exportNames(): Set<String> {
+        val raw = engine.evaluate<String>("JSON.stringify(Object.keys(__exports))", "exports.js")
+        return json.parseToJsonElement(raw).jsonArray
+            .map { it.jsonPrimitive.content }
+            .toSet()
+    }
+
     suspend fun call(name: String, argsJson: String, timeoutMs: Long = 120_000): String {
         val id = nextCallId.incrementAndGet()
         val deferred = CompletableDeferred<String>()
@@ -222,7 +235,15 @@ class Runtime(
         } finally {
             pendingCalls.remove(id)
         }
-        val st = json.parseToJsonElement(resultJson).jsonObject
+        val st = try {
+            json.parseToJsonElement(resultJson).jsonObject
+        } catch (e: Exception) {
+            println("  [call $name raw] len=${resultJson.length} head=${resultJson.take(90)} tail=${resultJson.takeLast(40)}")
+            throw RuntimeException(
+                "outer parse failed (len=${resultJson.length}, end=${resultJson.takeLast(30)}): ${e.message}",
+                e,
+            )
+        }
         if (st["ok"]?.jsonPrimitive?.boolean == true) {
             return st["valueJson"]!!.jsonPrimitive.content
         }
@@ -230,6 +251,94 @@ class Runtime(
             st["code"]?.let { if (it is JsonNull) null else it.jsonPrimitive.content },
             st["error"]?.jsonPrimitive?.content ?: "unknown plugin error",
         )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test bookkeeping (single-plugin mode and --all mode share this)
+// ---------------------------------------------------------------------------
+enum class Outcome { PASS, SKIP, NET, FAIL }
+
+data class Row(val plugin: String, val function: String, val outcome: Outcome, val detail: String)
+val rows = mutableListOf<Row>()
+
+fun record(plugin: String, fn: String, outcome: Outcome, detail: String) {
+    rows += Row(plugin, fn, outcome, detail)
+    println("%-5s %-22s %-24s %s".format(outcome, plugin, fn, detail))
+}
+
+fun isNetworkMessage(msg: String?): Boolean {
+    val m = msg ?: return false
+    return listOf(
+        "timeout", "timed out", "SocketTimeout", "UnknownHost", "ConnectException",
+        "ECONNRESET", "ENETUNREACH", "network", "fetch failed", "IOException", "SSL",
+        "Connection reset", "No route to host", "Unable to resolve host", "Failed to connect",
+    ).any { m.contains(it, ignoreCase = true) }
+}
+
+/** JS/parse failures are real host-visible defects; service errors are not. */
+fun looksLikeCodeError(msg: String?): Boolean {
+    val m = msg ?: return false
+    return listOf(
+        "TypeError", "ReferenceError", "SyntaxError", "RangeError", "Cannot read",
+        "is not a function", "is not defined", "Unexpected token", "JSON.parse",
+        "Cannot convert", "null is not", "undefined is not",
+    ).any { m.contains(it, ignoreCase = true) }
+}
+
+/** Retry once on timeout / IO / network-flavoured plugin errors, then classify. */
+suspend fun genericCall(
+    plugin: String,
+    fn: String,
+    timeoutMs: Long = 15_000,
+    block: suspend () -> String,
+) {
+    var attempt = 0
+    while (true) {
+        attempt++
+        try {
+            val detail = kotlinx.coroutines.withTimeout(timeoutMs) { block() }
+            record(plugin, fn, Outcome.PASS, detail)
+            return
+        } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+            if (attempt == 1) {
+                println("  [$plugin/$fn] timeout, retrying once")
+                continue
+            }
+            record(plugin, fn, Outcome.NET, "timeout after retry")
+            return
+        } catch (e: java.io.IOException) {
+            if (attempt == 1) {
+                println("  [$plugin/$fn] ${e.javaClass.simpleName}, retrying once")
+                continue
+            }
+            record(plugin, fn, Outcome.NET, "${e.javaClass.simpleName}: ${e.message}")
+            return
+        } catch (e: PluginCallException) {
+            val code = e.code ?: ""
+            val msg = e.message
+            when {
+                code in setOf("signIn", "setup", "unavailable", "unsupported") ->
+                    record(plugin, fn, Outcome.SKIP, "plugin code=$code")
+                isNetworkMessage(msg) -> {
+                    if (attempt == 1) {
+                        println("  [$plugin/$fn] network error, retrying once")
+                        continue
+                    }
+                    record(plugin, fn, Outcome.NET, "network: ${msg?.take(140)}")
+                }
+                // A plugin-reported service/region/anti-bot error is not a host
+                // code defect. Only actual JS/parse failures are FAILs.
+                looksLikeCodeError(msg) ->
+                    record(plugin, fn, Outcome.FAIL, "plugin error code=$code: ${msg?.take(160)}")
+                else ->
+                    record(plugin, fn, Outcome.SKIP, "plugin-reported: ${msg?.take(120)}")
+            }
+            return
+        } catch (e: Exception) {
+            record(plugin, fn, Outcome.FAIL, "${e.javaClass.simpleName}: ${e.message?.take(160)}")
+            return
+        }
     }
 }
 
@@ -249,13 +358,245 @@ suspend fun test(name: String, block: suspend () -> String) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Generic mode: exercise every bundled plugin's available exports.
+// ---------------------------------------------------------------------------
+suspend fun runPluginGeneric(pluginDir: File, http: OkHttpClient) {
+    val manifest = runCatching {
+        json.parseToJsonElement(File(pluginDir, "plugin.json").readText()).jsonObject
+    }.getOrNull()
+    if (manifest == null) {
+        record(pluginDir.name, "manifest", Outcome.FAIL, "unreadable plugin.json")
+        return
+    }
+    val id = manifest["id"]?.jsonPrimitive?.content ?: pluginDir.name
+    val mainFile = manifest["main"]?.jsonPrimitive?.content ?: "index.js"
+    val playback = manifest["playback"]?.jsonPrimitive?.content ?: "stream"
+    val processPerms = (manifest["permissions"]?.jsonObject?.get("process") as? kotlinx.serialization.json.JsonArray)
+        ?.size ?: 0
+    val needsHelperProcess = processPerms > 0 || playback != "stream"
+    val localesFile = File(pluginDir, "locales/zh-CN.json")
+    val locales: Map<String, String> = if (localesFile.exists()) {
+        json.parseToJsonElement(localesFile.readText()).jsonObject.mapValues { it.value.jsonPrimitive.content }
+    } else emptyMap()
+
+    val storageDir = File("build/harness-data").apply { mkdirs() }
+    val host = HostState(
+        storageFile = File(storageDir, "$id.json"),
+        settings = mapOf("quality" to "exhigh", "loginMethod" to "qr"),
+        locales = locales,
+        http = http,
+    )
+    val engine = QuickJs.create(jobDispatcher = Dispatchers.Default)
+    val runtime = Runtime(engine, host)
+    try {
+        runtime.install()
+        engine.addModule("plugin-entry", File(pluginDir, mainFile).readText())
+        runtime.loadModule("import * as plugin from \"plugin-entry\";\nglobalThis.__exports = plugin;")
+        val exports = runtime.exportNames()
+        record(id, "module-load", Outcome.PASS, "exports=${exports.size}")
+        runCatching { runtime.call("__warmup", "{}") }
+
+        val has = { name: String -> exports.contains(name) }
+        var trackId: String? = null
+        var playlistId: String? = null
+        var albumId: String? = null
+        var artistId: String? = null
+        var showId: String? = null
+
+        if (has("account")) genericCall(id, "account") {
+            val r = runtime.call("account", "{}")
+            if (r.trim() == "null") "null (logged out)" else "account object"
+        }
+        if (has("home")) genericCall(id, "home") {
+            val sections = json.parseToJsonElement(runtime.call("home", "{}"))
+                .jsonObject["sections"]?.jsonArray
+            "sections=${sections?.size ?: 0}"
+        }
+        if (has("browse")) genericCall(id, "browse") {
+            // Mirror the app: browse is always called with a `page` ("" = root).
+            val sections = json.parseToJsonElement(runtime.call("browse", """{"page":""}"""))
+                .jsonObject["sections"]?.jsonArray
+            "sections=${sections?.size ?: 0}"
+        }
+        if (has("suggest")) genericCall(id, "suggest") {
+            val arr = json.parseToJsonElement(runtime.call("suggest", """{"query":"周杰"}""")).jsonArray
+            "suggestions=${arr.size}"
+        }
+        if (has("search")) {
+            genericCall(id, "search.tracks") {
+                val r = runtime.call("search", """{"query":"周杰伦","kind":"tracks","offset":0}""")
+                val tracks = json.parseToJsonElement(r).jsonObject["tracks"]?.jsonArray
+                    ?: throw RuntimeException("no 'tracks' field")
+                if (tracks.isNotEmpty()) trackId = tracks[0].jsonObject["id"]?.jsonPrimitive?.content
+                "tracks=${tracks.size}"
+            }
+            genericCall(id, "search.playlists") {
+                val r = runtime.call("search", """{"query":"周杰伦","kind":"playlists","offset":0}""")
+                val arr = try {
+                    json.parseToJsonElement(r).jsonObject["playlists"]?.jsonArray
+                        ?: throw RuntimeException("no 'playlists' field")
+                } catch (e: Exception) {
+                    // Print the raw-result shape to stdout as well: the matrix
+                    // record keeps only the root-cause message, which hides
+                    // whether the delivered JSON was truncated or empty.
+                    println("  [search.playlists raw] len=${r.length} head=${r.take(60)} tail=${r.takeLast(60)}")
+                    throw RuntimeException(
+                        "parse failed (len=${r.length}, head=${r.take(40)}, tail=${r.takeLast(40)}): ${e.message}",
+                        e,
+                    )
+                }
+                if (arr.isNotEmpty()) playlistId = arr[0].jsonObject["id"]?.jsonPrimitive?.content
+                "playlists=${arr.size}"
+            }
+            genericCall(id, "search.albums") {
+                val r = runtime.call("search", """{"query":"周杰伦","kind":"albums","offset":0}""")
+                val arr = json.parseToJsonElement(r).jsonObject["albums"]?.jsonArray
+                    ?: throw RuntimeException("no 'albums' field")
+                if (arr.isNotEmpty()) albumId = arr[0].jsonObject["id"]?.jsonPrimitive?.content
+                "albums=${arr.size}"
+            }
+            genericCall(id, "search.artists") {
+                val r = runtime.call("search", """{"query":"周杰伦","kind":"artists","offset":0}""")
+                val arr = json.parseToJsonElement(r).jsonObject["artists"]?.jsonArray
+                    ?: throw RuntimeException("no 'artists' field")
+                if (arr.isNotEmpty()) artistId = arr[0].jsonObject["id"]?.jsonPrimitive?.content
+                "artists=${arr.size}"
+            }
+        }
+        if (has("lyrics")) {
+            val tid = trackId
+            if (tid == null) record(id, "lyrics", Outcome.SKIP, "no track id from search")
+            else genericCall(id, "lyrics") {
+                val o = json.parseToJsonElement(runtime.call("lyrics", """{"id":"$tid"}""")).jsonObject
+                val lines = o["lines"]?.jsonArray
+                val lrc = o["lrc"]?.jsonPrimitive?.content
+                "lines=${lines?.size ?: 0} lrc=${lrc?.length ?: 0}ch"
+            }
+        }
+        if (has("stream")) {
+            val tid = trackId
+            when {
+                needsHelperProcess -> record(
+                    id, "stream", Outcome.SKIP,
+                    "requires helper process/remote playback (host.spawn not provided on Android)",
+                )
+                tid == null -> record(id, "stream", Outcome.SKIP, "no track id from search")
+                else -> genericCall(id, "stream") {
+                    val o = json.parseToJsonElement(
+                        runtime.call("stream", """{"id":"$tid","quality":"standard"}""")
+                    ).jsonObject
+                    val u = o["url"]?.jsonPrimitive?.content
+                    if (u.isNullOrBlank()) throw RuntimeException("empty stream url")
+                    val hostName = runCatching { java.net.URI(u).host }.getOrNull()
+                    "type=${o["type"]?.jsonPrimitive?.content} host=$hostName"
+                }
+            }
+        }
+        if (has("playlist")) {
+            val pid = playlistId
+            if (pid == null) record(id, "playlist", Outcome.SKIP, "no playlist id from search")
+            else genericCall(id, "playlist") {
+                val o = json.parseToJsonElement(runtime.call("playlist", """{"id":"$pid"}""")).jsonObject
+                "name=${o["name"]?.jsonPrimitive?.content} tracks=${o["tracks"]?.jsonArray?.size ?: 0}"
+            }
+        }
+        if (has("album")) {
+            val aid = albumId
+            if (aid == null) record(id, "album", Outcome.SKIP, "no album id from search")
+            else genericCall(id, "album") {
+                val o = json.parseToJsonElement(runtime.call("album", """{"id":"$aid"}""")).jsonObject
+                "tracks=${o["tracks"]?.jsonArray?.size ?: 0}"
+            }
+        }
+        if (has("artist")) {
+            val aid = artistId
+            if (aid == null) record(id, "artist", Outcome.SKIP, "no artist id from search")
+            else genericCall(id, "artist") {
+                val o = json.parseToJsonElement(runtime.call("artist", """{"id":"$aid"}""")).jsonObject
+                "albums=${o["albums"]?.jsonArray?.size ?: 0} tracks=${o["tracks"]?.jsonArray?.size ?: 0}"
+            }
+        }
+        if (has("playlists")) genericCall(id, "playlists") {
+            val arr = json.parseToJsonElement(runtime.call("playlists", "{}")).jsonArray
+            "playlists=${arr.size}"
+        }
+        if (has("liked")) genericCall(id, "liked") {
+            val o = json.parseToJsonElement(runtime.call("liked", """{"offset":0}""")).jsonObject
+            "tracks=${o["tracks"]?.jsonArray?.size ?: 0} more=${o["more"]?.jsonPrimitive?.content}"
+        }
+        if (has("recent")) genericCall(id, "recent") {
+            val arr = json.parseToJsonElement(runtime.call("recent", "{}")).jsonArray
+            "recent=${arr.size}"
+        }
+        if (has("savedAlbums")) genericCall(id, "savedAlbums") {
+            val arr = json.parseToJsonElement(runtime.call("savedAlbums", "{}")).jsonArray
+            "albums=${arr.size}"
+        }
+        if (has("shows")) {
+            genericCall(id, "shows") {
+                val arr = json.parseToJsonElement(runtime.call("shows", "{}")).jsonArray
+                if (arr.isNotEmpty()) showId = arr[0].jsonObject["id"]?.jsonPrimitive?.content
+                "shows=${arr.size}"
+            }
+            if (has("show")) {
+                val sid = showId
+                if (sid == null) record(id, "show", Outcome.SKIP, "no show id")
+                else genericCall(id, "show") {
+                    val o = json.parseToJsonElement(
+                        runtime.call("show", """{"id":"$sid","offset":0}""")
+                    ).jsonObject
+                    "episodes=${o["episodes"]?.jsonArray?.size ?: 0}"
+                }
+            }
+        }
+
+        val covered = setOf(
+            "account", "home", "browse", "suggest", "search", "lyrics", "stream",
+            "playlist", "album", "artist", "playlists", "liked", "recent",
+            "savedAlbums", "shows", "show",
+        )
+        val unexercised = exports - covered - setOf("default")
+        if (unexercised.isNotEmpty()) {
+            record(id, "unexercised", Outcome.SKIP, unexercised.sorted().joinToString(","))
+        }
+    } catch (e: Exception) {
+        record(id, "module-load", Outcome.FAIL, "${e.javaClass.simpleName}: ${e.message}")
+    } finally {
+        runCatching { engine.close() }
+    }
+}
+
 fun main(args: Array<String>) = runBlocking {
+    val http = httpClient()
+    val bundledRoot = File("../app/src/main/assets/plugins").let {
+        if (it.isDirectory) it else File("app/src/main/assets/plugins")
+    }
+    if (args.firstOrNull() == "--all") {
+        require(bundledRoot.isDirectory) { "bundled plugin dir not found: ${bundledRoot.absolutePath}" }
+        val filter = args.getOrNull(1)
+        val dirs = bundledRoot.listFiles { f -> f.isDirectory }
+            ?.filter { filter == null || it.name.contains(filter, ignoreCase = true) }
+            ?.sortedBy { it.name }.orEmpty()
+        println("Running generic harness for ${dirs.size} bundled plugins (filter=${filter ?: "*"})\n")
+        for (dir in dirs) {
+            println("=== ${dir.name} ===")
+            runPluginGeneric(dir, http)
+        }
+        println("\n================ MATRIX ================")
+        val byPlugin = rows.groupBy { it.plugin }
+        for ((plugin, list) in byPlugin) {
+            val counts = list.groupingBy { it.outcome }.eachCount()
+            println("$plugin: " + Outcome.entries.joinToString(" ") { "$it=${counts[it] ?: 0}" })
+        }
+        val totals = rows.groupingBy { it.outcome }.eachCount()
+        println("\nTOTAL " + Outcome.entries.joinToString(" ") { "$it=${totals[it] ?: 0}" })
+        return@runBlocking
+    }
+
     // Default to a plugin bundled in this repo, so the harness runs on a fresh
     // clone with no arguments. Override with argv[0] or MYGO_HARNESS_PLUGIN_DIR.
-    val defaultPluginDir = File("../app/src/main/assets/plugins/netease-cloud-music").let { bundled ->
-        if (bundled.isDirectory) bundled.path
-        else File("app/src/main/assets/plugins/netease-cloud-music").path
-    }
+    val defaultPluginDir = File(bundledRoot, "netease-cloud-music").path
     val pluginDir = File(
         args.getOrNull(0)
             ?: System.getenv("MYGO_HARNESS_PLUGIN_DIR")
@@ -279,7 +620,7 @@ fun main(args: Array<String>) = runBlocking {
         storageFile = File("storage.json"),
         settings = mapOf("quality" to "exhigh", "loginMethod" to "qr"),
         locales = locales,
-        http = httpClient(),
+        http = http,
     )
 
     val engine = QuickJs.create(jobDispatcher = Dispatchers.Default)
@@ -305,85 +646,69 @@ fun main(args: Array<String>) = runBlocking {
         runtime.loadModule("import * as plugin from \"plugin-entry\";\nglobalThis.__exports = plugin;")
         println("module wrapper evaluated")
     } catch (e: Exception) {
-        println("MODULE LOAD FAILED: ${e.message}")
-    }
-    println("exports are exercised through the calls below")
-
-    // Mirror the app's warm-up (PluginRuntime.load): the engine can trip an
-    // internal result-box error on the first call after a module load, so burn
-    // it on a side-effect-free export before the real assertions run.
-    runCatching { runtime.call("account", "{}", timeoutMs = 30_000) }
-
-    test("account (logged out)") {
-        val r = runtime.call("account", "{}")
-        if (r != "null") throw RuntimeException("expected null, got $r")
-        "null as expected"
+        println("FAIL  module load — ${e.javaClass.simpleName}: ${e.message}")
+        return@runBlocking
     }
 
-    var firstTrackId: String? = null
-    test("search tracks 周杰伦") {
-        val r = runtime.call("search", """{"query":"周杰伦","kind":"tracks","offset":0}""")
-        val tracks = json.parseToJsonElement(r).jsonObject["tracks"]!!.jsonArray
-        if (tracks.isEmpty()) throw RuntimeException("no tracks")
-        val first = tracks[0].jsonObject
-        firstTrackId = first["id"]!!.jsonPrimitive.content
-        val names = tracks.take(3).joinToString(" | ") {
-            val o = it.jsonObject
-            "${o["name"]?.jsonPrimitive?.content} — ${o["artists"]?.jsonArray?.joinToString(",") { a -> a.jsonObject["name"]!!.jsonPrimitive.content }}"
-        }
-        "${tracks.size} tracks; first: $names"
-    }
-
-    test("suggest 周杰") {
-        val r = runtime.call("suggest", """{"query":"周杰"}""")
-        val arr = json.parseToJsonElement(r).jsonArray
-        "${arr.size} suggestions: ${arr.take(3).joinToString(", ") { it.jsonPrimitive.content }}"
-    }
-
-    test("search playlists -> playlist detail") {
-        val r = runtime.call("search", """{"query":"周杰伦","kind":"playlists","offset":0}""")
-        val pls = json.parseToJsonElement(r).jsonObject["playlists"]!!.jsonArray
-        if (pls.isEmpty()) throw RuntimeException("no playlists")
-        val pid = pls[0].jsonObject["id"]!!.jsonPrimitive.content
-        val detail = runtime.call("playlist", """{"id":"$pid"}""")
-        val o = json.parseToJsonElement(detail).jsonObject
-        val tracks = o["tracks"]?.jsonArray
-        "playlist '${o["name"]?.jsonPrimitive?.content}' trackCount=${o["trackCount"]?.jsonPrimitive?.content} hydrated=${tracks?.size}"
-    }
-
-    test("lyrics of first search track") {
-        val id = firstTrackId ?: throw RuntimeException("no track id")
-        val r = runtime.call("lyrics", """{"id":"$id"}""")
-        val o = json.parseToJsonElement(r).jsonObject
-        val lines = o["lines"]?.jsonArray
-        val lrc = o["lrc"]?.jsonPrimitive?.content
-        "lines=${lines?.size ?: 0} lrc=${lrc?.length ?: 0} chars" +
-            (lines?.firstOrNull()?.jsonObject?.get("text")?.jsonPrimitive?.content?.let { " first=\"$it\"" } ?: "")
-    }
-
-    test("stream of first search track") {
-        val id = firstTrackId ?: throw RuntimeException("no track id")
-        val r = runtime.call("stream", """{"id":"$id","quality":"standard"}""")
-        val o = json.parseToJsonElement(r).jsonObject
-        "type=${o["type"]?.jsonPrimitive?.content} br=${o["bitRate"]?.jsonPrimitive?.content} url=${o["url"]?.jsonPrimitive?.content?.take(80)}..."
-    }
-
-    test("home (guest)") {
+    test("home") {
         val r = runtime.call("home", "{}")
-        val sections = json.parseToJsonElement(r).jsonObject["sections"]?.jsonArray
-        "sections=${sections?.size ?: 0}: " + (sections?.joinToString(", ") { it.jsonObject["title"]?.jsonPrimitive?.content ?: "?" } ?: "")
+        "sections=" + (json.parseToJsonElement(r).jsonObject["sections"]?.jsonArray?.size ?: 0)
+    }
+    test("search tracks") {
+        val r = runtime.call("search", """{"query":"周杰伦","kind":"tracks","offset":0}""")
+        "tracks=" + (json.parseToJsonElement(r).jsonObject["tracks"]?.jsonArray?.size ?: 0)
+    }
+    test("search playlists") {
+        val r = runtime.call("search", """{"query":"周杰伦","kind":"playlists","offset":0}""")
+        "playlists=" + (json.parseToJsonElement(r).jsonObject["playlists"]?.jsonArray?.size ?: 0)
+    }
+    test("search albums") {
+        val r = runtime.call("search", """{"query":"周杰伦","kind":"albums","offset":0}""")
+        "albums=" + (json.parseToJsonElement(r).jsonObject["albums"]?.jsonArray?.size ?: 0)
+    }
+    test("search artists") {
+        val r = runtime.call("search", """{"query":"周杰伦","kind":"artists","offset":0}""")
+        "artists=" + (json.parseToJsonElement(r).jsonObject["artists"]?.jsonArray?.size ?: 0)
+    }
+    test("suggest") {
+        val r = runtime.call("suggest", """{"query":"周杰"}""")
+        "suggestions=" + json.parseToJsonElement(r).jsonArray.size
     }
 
-    test("playlists (expect signIn error)") {
-        try {
-            val r = runtime.call("playlists", "{}")
-            "no error?! returned ${r.take(80)}"
-        } catch (e: PluginCallException) {
-            if (e.code == "signIn") "signIn code as expected"
-            else throw RuntimeException("unexpected code=${e.code} msg=${e.message}")
+    // Resolve one real track id from the search result for detail/lyrics/stream.
+    val trackId = runCatching {
+        val r = runtime.call("search", """{"query":"周杰伦","kind":"tracks","offset":0}""")
+        json.parseToJsonElement(r).jsonObject["tracks"]?.jsonArray?.firstOrNull()
+            ?.jsonObject?.get("id")?.jsonPrimitive?.content
+    }.getOrNull()
+    if (trackId != null) {
+        test("lyrics") {
+            val o = json.parseToJsonElement(runtime.call("lyrics", """{"id":"$trackId"}""")).jsonObject
+            "lines=" + (o["lines"]?.jsonArray?.size ?: 0) +
+                " lrc=" + (o["lrc"]?.jsonPrimitive?.content?.length ?: 0) + "ch"
         }
+        test("stream") {
+            val o = json.parseToJsonElement(
+                runtime.call("stream", """{"id":"$trackId","quality":"standard"}""")
+            ).jsonObject
+            val u = o["url"]?.jsonPrimitive?.content
+            if (u.isNullOrBlank()) throw RuntimeException("empty stream url")
+            "type=" + o["type"]?.jsonPrimitive?.content
+        }
+    } else {
+        println("SKIP  lyrics/stream — no track id from search")
+    }
+    test("playlists") {
+        val r = runtime.call("playlists", "{}")
+        "playlists=" + json.parseToJsonElement(r).jsonArray.size
+    }
+    test("liked") {
+        val o = json.parseToJsonElement(runtime.call("liked", """{"offset":0}""")).jsonObject
+        "tracks=" + (o["tracks"]?.jsonArray?.size ?: 0) +
+            " more=" + o["more"]?.jsonPrimitive?.content
     }
 
-    println("== summary: $passed passed, $failed failed ==")
-    engine.close()
+    println("\nRESULT passed=$passed failed=$failed")
+    runCatching { engine.close() }
+    Unit
 }

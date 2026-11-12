@@ -1,11 +1,14 @@
 package dev.walden.mygomusic.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -16,6 +19,13 @@ import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.staggeredgrid.LazyStaggeredGridScope
+import androidx.compose.foundation.lazy.staggeredgrid.LazyVerticalStaggeredGrid
+import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells
+import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridItemSpan
+import androidx.compose.foundation.lazy.staggeredgrid.items as gridItems
+import androidx.compose.foundation.lazy.staggeredgrid.itemsIndexed as gridItemsIndexed
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.QueueMusic
@@ -39,6 +49,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
+import dev.walden.mygomusic.Artist
 import dev.walden.mygomusic.Section
 import dev.walden.mygomusic.Track
 import dev.walden.mygomusic.ui.Load
@@ -64,13 +75,16 @@ fun HomeScreen(state: MyGoState) {
     LaunchedEffect(Unit) { state.loadHome() }
     val home = state.home
     val ready = home.readyOrNull()
+    // C7: capture once; pluginError is a mutable state and can be cleared
+    // between the null check and the composition of the error row.
+    val pluginError = state.pluginError
 
     LazyColumn(Modifier.fillMaxSize()) {
-        if (state.pluginError != null && ready == null) {
+        if (pluginError != null && ready == null) {
             item { Spacer(Modifier.height(60.dp)) }
             item {
                 ErrorState(
-                    state.pluginError!!,
+                    pluginError,
                     onRetry = { state.manifest?.let { state.activate(it) } },
                 )
             }
@@ -224,7 +238,7 @@ fun BrowseRouteScreen(state: MyGoState) {
             )
         }
         if (navPages.isNotEmpty()) {
-            items(navPages, key = { it.second.toString() }) { (title, route, _) ->
+            itemsIndexed(navPages, key = { index, item -> "$index-${item.second}" }) { _, (title, route, _) ->
                 NavigateRow(
                     title = title,
                     leadingIcon = Icons.Rounded.Album,
@@ -261,7 +275,7 @@ private fun NavEntriesScreen(state: MyGoState) {
         if (pages.isEmpty()) {
             item { EmptyState("这个音源没有可浏览的页面", "试试搜索，或换一个音源") }
         } else {
-            items(pages, key = { it.page ?: it.title ?: "" }) { nav ->
+            itemsIndexed(pages, key = { index, nav -> "$index-${nav.page ?: nav.title ?: ""}" }) { _, nav ->
                 NavigateRow(
                     title = nav.title ?: nav.page ?: "页面",
                     leadingIcon = Icons.Rounded.Album,
@@ -279,29 +293,289 @@ fun BrowsePageScreen(state: MyGoState, path: String) {
     LaunchedEffect(path) { state.loadPage(path) }
     val page = state.pages[path]
     val ready = page?.readyOrNull()
-    LazyColumn(Modifier.fillMaxSize()) {
-        if (ready != null) {
-            if (!ready.imageUrl.isNullOrBlank()) {
-                item { PageHero(state, ready.title, ready.subtitle, ready.description, ready.imageUrl) }
-            } else if (!ready.title.isNullOrBlank()) {
-                item { SectionHeader(ready.title!!, subtitle = ready.subtitle) }
+    when {
+        ready != null -> {
+            // Pushed pages are "show everything" pages: lay the cards out as a
+            // two-column waterfall (瀑布流), not the home screen's horizontal rows.
+            LazyVerticalStaggeredGrid(
+                columns = StaggeredGridCells.Fixed(2),
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
+                verticalItemSpacing = 18.dp,
+            ) {
+                if (!ready.imageUrl.isNullOrBlank()) {
+                    item(span = StaggeredGridItemSpan.FullLine) {
+                        PageHero(state, ready.title, ready.subtitle, ready.description, ready.imageUrl)
+                    }
+                } else if (!ready.title.isNullOrBlank()) {
+                    item(span = StaggeredGridItemSpan.FullLine) {
+                        GridSectionTitle(ready.title!!, ready.subtitle)
+                    }
+                }
+                if (ready.sections.isEmpty()) {
+                    item(span = StaggeredGridItemSpan.FullLine) { EmptyState("这里暂时是空的") }
+                } else {
+                    browseSectionsGrid(state, ready.sections)
+                }
+                item(span = StaggeredGridItemSpan.FullLine) { Spacer(Modifier.height(16.dp)) }
             }
-            if (ready.sections.isEmpty()) {
-                item { EmptyState("这里暂时是空的") }
-            } else {
-                browseSections(state, ready.sections)
+        }
+
+        page == null || page is Load.Loading -> {
+            LazyColumn(Modifier.fillMaxSize()) {
+                repeat(3) { item { SkeletonRow() } }
             }
-        } else if (page == null || page is Load.Loading) {
-            repeat(3) { item { SkeletonRow() } }
-        } else {
-            item {
-                ErrorState(
-                    (page as? Load.Failed)?.message ?: "加载失败",
-                    onRetry = { state.loadPage(path) },
+        }
+
+        else -> {
+            LazyColumn(Modifier.fillMaxSize()) {
+                item {
+                    ErrorState(
+                        (page as? Load.Failed)?.message ?: "加载失败",
+                        onRetry = { state.loadPage(path) },
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** Full-section page for sections without a plugin morePage: the loaded items, as a waterfall grid. */
+@Composable
+fun SectionAllScreen(state: MyGoState) {
+    val section = state.sectionAll
+    if (section == null) {
+        EmptyState("这里暂时是空的")
+        return
+    }
+    LazyVerticalStaggeredGrid(
+        columns = StaggeredGridCells.Fixed(2),
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 12.dp, bottom = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+        verticalItemSpacing = 18.dp,
+    ) {
+        if (!section.subtitle.isNullOrBlank()) {
+            item(span = StaggeredGridItemSpan.FullLine) {
+                Text(
+                    section.subtitle!!,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 4.dp),
                 )
             }
         }
-        item { Spacer(Modifier.height(24.dp)) }
+        sectionGridItems(state, section)
+        item(span = StaggeredGridItemSpan.FullLine) { Spacer(Modifier.height(16.dp)) }
+    }
+}
+
+/** Section title inside a grid page (SectionHeader's own padding would double the grid's). */
+@Composable
+private fun GridSectionTitle(
+    title: String,
+    subtitle: String? = null,
+    onMore: (() -> Unit)? = null,
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(top = 10.dp, bottom = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                title,
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (!subtitle.isNullOrBlank()) {
+                Text(
+                    subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        if (onMore != null) {
+            TextButton(onClick = onMore) {
+                Text("更多", style = MaterialTheme.typography.labelLarge)
+            }
+        }
+    }
+}
+
+/** Sections laid out as a waterfall grid instead of horizontal rows (pushed pages). */
+private fun LazyStaggeredGridScope.browseSectionsGrid(
+    state: MyGoState,
+    sections: List<Section>,
+) {
+    sections.forEachIndexed { sectionIndex, section ->
+        val title = section.title?.takeIf { it.isNotBlank() }
+        val hasContent = section.tracks.isNotEmpty() || section.albums.isNotEmpty() ||
+            section.artists.isNotEmpty() || section.playlists.isNotEmpty() ||
+            section.shows.isNotEmpty() || section.stations.isNotEmpty() ||
+            section.links.isNotEmpty()
+        if (!hasContent) {
+            if (!section.empty.isNullOrBlank()) {
+                item(span = StaggeredGridItemSpan.FullLine, key = "g-empty-$sectionIndex") {
+                    Column {
+                        if (title != null) GridSectionTitle(title, section.subtitle)
+                        EmptyState(section.empty!!)
+                    }
+                }
+            }
+            return@forEachIndexed
+        }
+        if (title != null) {
+            item(span = StaggeredGridItemSpan.FullLine, key = "g-title-$sectionIndex") {
+                GridSectionTitle(
+                    title,
+                    subtitle = section.subtitle,
+                    onMore = section.morePage?.let { page -> { state.push(Route.Page(page, section.pageTitle ?: title)) } },
+                )
+            }
+        }
+        sectionGridItems(state, section, keyPrefix = "g$sectionIndex-")
+    }
+}
+
+/** One section's cards as waterfall grid items (links stay full-width rows). */
+private fun LazyStaggeredGridScope.sectionGridItems(
+    state: MyGoState,
+    section: Section,
+    keyPrefix: String = "",
+) {
+    gridItemsIndexed(section.tracks, key = { index, track -> "$keyPrefix${track.id}-$index" }) { index, track ->
+        GridMediaCard(
+            title = track.name.ifBlank { "未知歌曲" },
+            subtitle = track.artistNames(),
+            imageUrl = track.album.imageUrl,
+            onClick = { state.playQueue(section.tracks, index) },
+        )
+    }
+    gridItems(section.albums, key = { "${keyPrefix}album-${it.id}" }) { album ->
+        GridMediaCard(
+            title = album.name,
+            subtitle = album.artists.joinToString(", ") { it.name },
+            imageUrl = album.imageUrl,
+            onClick = { state.openAlbum(album) },
+        )
+    }
+    gridItems(section.artists, key = { "${keyPrefix}artist-${it.id}" }) { artist ->
+        GridArtistCard(artist, onClick = { state.openArtist(artist) })
+    }
+    gridItems(section.playlists, key = { "${keyPrefix}playlist-${it.id}" }) { playlist ->
+        GridMediaCard(
+            title = playlist.name,
+            subtitle = playlist.owner ?: "${playlist.trackCount} 首",
+            imageUrl = playlist.imageUrl,
+            onClick = { state.openPlaylist(playlist) },
+        )
+    }
+    gridItems(section.shows, key = { "${keyPrefix}show-${it.id}" }) { show ->
+        GridMediaCard(
+            title = show.name,
+            subtitle = show.publisher ?: "${show.episodeCount} 集",
+            imageUrl = show.imageUrl,
+            onClick = { state.openShow(show) },
+        )
+    }
+    gridItems(section.stations, key = { "${keyPrefix}station-${it.id}" }) { station ->
+        GridMediaCard(
+            title = station.name,
+            subtitle = station.description ?: "电台",
+            imageUrl = station.imageUrl,
+            onClick = { state.playStation(station.id, station.name) },
+        )
+    }
+    gridItems(
+        section.links,
+        key = { "${keyPrefix}link-${it.page}-${it.title}" },
+        span = { StaggeredGridItemSpan.FullLine },
+    ) { link ->
+        NavigateRow(
+            title = link.title,
+            subtitle = link.subtitle,
+            imageUrl = link.imageUrl,
+            onClick = { state.openPage(link) },
+        )
+    }
+}
+
+/** MediaCard's grid sibling: fills its column, square cover, title may wrap to two lines. */
+@Composable
+private fun GridMediaCard(
+    title: String,
+    subtitle: String?,
+    imageUrl: String?,
+    onClick: () -> Unit,
+) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+    ) {
+        CoverImage(
+            imageUrl,
+            Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f),
+            shape = RoundedCornerShape(12.dp),
+            iconSize = 28.dp,
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            title.ifBlank { "未命名" },
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+        if (!subtitle.isNullOrBlank()) {
+            Text(
+                subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+@Composable
+private fun GridArtistCard(
+    artist: Artist,
+    onClick: () -> Unit,
+) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        CoverImage(
+            artist.imageUrl,
+            Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f),
+            shape = CircleShape,
+            iconSize = 28.dp,
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            artist.name,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
@@ -386,10 +660,22 @@ private fun LazyListScope.browseSections(
 
         if (title != null) {
             item("title-${sectionIndex}") {
+                val cardCount = section.tracks.size + section.albums.size + section.artists.size +
+                    section.playlists.size + section.shows.size + section.stations.size
                 SectionHeader(
                     title,
                     subtitle = section.subtitle,
-                    onMore = section.morePage?.let { page -> { state.push(Route.Page(page, section.pageTitle ?: title)) } },
+                    onMore = when {
+                        section.morePage != null -> {
+                            val page = section.morePage
+                            val pageTitle = section.pageTitle ?: title
+                            ({ state.push(Route.Page(page, pageTitle)) })
+                        }
+                        // Plugins often give a section no morePage (e.g. 网易云 推荐歌单);
+                        // fall back to a local grid page over the items already loaded.
+                        cardCount >= 3 -> ({ state.openSectionAll(section) })
+                        else -> null
+                    },
                 )
             }
         }

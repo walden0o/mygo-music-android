@@ -69,6 +69,7 @@ fun RouteScreen(state: MyGoState, route: Route) {
         is Route.ArtistDetail -> ArtistDetailScreen(state, route)
         is Route.ShowDetail -> ShowDetailScreen(state, route)
         is Route.Page -> BrowsePageScreen(state, route.path)
+        is Route.SectionAll -> SectionAllScreen(state)
         Route.Liked -> LikedScreen(state)
         Route.Recent -> RecentScreen(state)
         Route.Playlists -> PlaylistsScreen(state)
@@ -274,7 +275,7 @@ fun ArtistDetailScreen(state: MyGoState, route: Route.ArtistDetail) {
                         contentPadding = PaddingValues(horizontal = 20.dp),
                         horizontalArrangement = Arrangement.spacedBy(14.dp),
                     ) {
-                        items(page.albums, key = { "ab-${it.id}" }) { album ->
+                        itemsIndexed(page.albums, key = { index, album -> "ab-$index-${album.id}" }) { _, album ->
                             dev.walden.mygomusic.ui.components.MediaCard(
                                 title = album.name,
                                 subtitle = album.released,
@@ -413,7 +414,7 @@ fun PlaylistsScreen(state: MyGoState) {
         load is Load.Failed -> ErrorState(load.message, onRetry = { state.loadLibrary(force = true) })
         playlists.isEmpty() -> EmptyState("还没有歌单", "在插件里创建歌单后会出现在这里")
         else -> LazyColumn(Modifier.fillMaxSize()) {
-            items(playlists, key = { it.id }) { playlist ->
+            itemsIndexed(playlists, key = { index, playlist -> "pl-$index-${playlist.id}" }) { _, playlist ->
                 NavigateRow(
                     title = playlist.name,
                     subtitle = "${playlist.trackCount} 首" + (playlist.owner?.let { " · $it" } ?: ""),
@@ -538,7 +539,7 @@ fun ShowsScreen(state: MyGoState) {
         load is Load.Failed -> ErrorState(load.message, onRetry = { state.loadShowList() })
         shows != null -> if (shows.isEmpty()) EmptyState("还没有订阅播客")
         else LazyColumn(Modifier.fillMaxSize()) {
-            items(shows, key = { it.id }) { show ->
+            itemsIndexed(shows, key = { index, show -> "sh-$index-${show.id}" }) { _, show ->
                 NavigateRow(
                     title = show.name,
                     subtitle = show.publisher ?: "${show.episodeCount} 集",

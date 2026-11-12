@@ -38,7 +38,13 @@ import javax.crypto.spec.SecretKeySpec
 
 class PluginCallException(val code: String?, message: String) : Exception(message)
 
-val pluginJson = Json { ignoreUnknownKeys = true }
+// coerceInputValues: a plugin may serialise a field as explicit JSON null even
+// though the model field is non-nullable with a default (e.g. {"name": null}).
+// Without this the whole result fails to decode; with it the default applies.
+val pluginJson = Json {
+    ignoreUnknownKeys = true
+    coerceInputValues = true
+}
 
 data class SettingDef(
     val key: String,
@@ -80,6 +86,15 @@ object PluginCatalog {
                 val text = am.open("plugins/$dir/plugin.json").bufferedReader().readText()
                 val m = pluginJson.parseToJsonElement(text).jsonObject
                 val main = m["main"]?.jsonPrimitive?.content ?: "index.js"
+                val id = m["id"]?.jsonPrimitive?.content ?: dir
+                // S6: id/main are interpolated into asset, data-dir and
+                // SharedPreferences paths. Reject path separators / traversal
+                // from a malformed (or future imported) manifest.
+                fun unsafe(s: String) = s.isBlank() || s.contains('/') || s.contains('\\') || s.contains("..")
+                if (unsafe(id) || unsafe(main)) {
+                    android.util.Log.w("MyGoPlugin", "skipping plugin $dir: unsafe id/main ($id / $main)")
+                    continue
+                }
                 val source = am.open("plugins/$dir/$main").bufferedReader().readText()
                 val perms = m["permissions"]?.jsonObject
                 val network = (perms?.get("network") as? kotlinx.serialization.json.JsonArray)
@@ -117,7 +132,7 @@ object PluginCatalog {
                 if (source.contains("host.webSignIn")) reasons += "web sign-in"
                 if (source.contains("host.waitForRedirect")) reasons += "browser sign-in"
                 out += PluginManifest(
-                    id = m["id"]?.jsonPrimitive?.content ?: dir,
+                    id = id,
                     name = m["name"]?.jsonPrimitive?.content ?: dir,
                     version = m["version"]?.jsonPrimitive?.content ?: "",
                     main = main,
@@ -130,7 +145,9 @@ object PluginCatalog {
                     partialReasons = reasons,
                 )
             } catch (e: Exception) {
-                // A malformed bundled plugin is skipped, never fatal.
+                // A malformed bundled plugin is skipped, never fatal — but log it
+                // so a broken plugin does not vanish silently.
+                android.util.Log.w("MyGoPlugin", "skipping malformed plugin $dir: ${e.message}")
             }
         }
         return out
@@ -225,7 +242,15 @@ class PluginRuntime(
         val obj = kotlinx.serialization.json.buildJsonObject {
             for ((k, v) in storage) put(k, pluginJson.parseToJsonElement(v))
         }
-        storageFile.writeText(obj.toString())
+        // C12: write-then-rename so a crash mid-write cannot truncate the file
+        // that holds the plugin's login tokens.
+        val tmp = File(dataDir, "storage.json.tmp")
+        tmp.writeText(obj.toString())
+        if (!tmp.renameTo(storageFile)) {
+            // Fallback for filesystems where rename-over-existing is unsupported.
+            storageFile.writeText(obj.toString())
+            tmp.delete()
+        }
     }
 
     private fun httpSync(reqJson: String): String {
@@ -248,10 +273,17 @@ class PluginRuntime(
                 val pairs = kotlinx.serialization.json.buildJsonArray {
                     for ((name, value) in resp.headers) add(kotlinx.serialization.json.buildJsonArray { add(name); add(value) })
                 }
+                // Read the bytes once: the prelude's fetch needs the text body
+                // AND a lossless binary form (arrayBuffer) — plugins such as
+                // Kugou AES-decrypt the raw response. Decoding mirrors
+                // OkHttp's ResponseBody.string() charset behaviour.
+                val bodyBytes = resp.body?.bytes() ?: ByteArray(0)
+                val charset = resp.body?.contentType()?.charset(Charsets.UTF_8) ?: Charsets.UTF_8
                 kotlinx.serialization.json.buildJsonObject {
                     put("status", resp.code)
                     put("headers", pairs)
-                    put("body", resp.body?.string() ?: "")
+                    put("body", bodyBytes.toString(charset))
+                    put("bodyBase64", java.util.Base64.getEncoder().encodeToString(bodyBytes))
                 }.toString()
             }
         } catch (e: Exception) {
@@ -271,18 +303,21 @@ class PluginRuntime(
             loadLocked()
         }
         // Warm-up: the engine can trip an internal result-box error on the
-        // first call after a module load. Absorb it here on a side-effect-free
-        // export so the first real user call is clean.
-        if (can("account")) {
-            runCatching { call("account", "{}", timeoutMs = 30_000) }
-        }
+        // first call after a module load. Absorb it here with the prelude's
+        // synthetic local no-op so activation never waits on a plugin network
+        // call (the old `account` warm-up could block readiness for 30 s and
+        // was then immediately repeated by refreshAccount()).
+        runCatching { call("__warmup", "{}", timeoutMs = 30_000) }
     }
 
     private suspend fun loadLocked() {
         engine.function("_log") { a ->
             // Plugin console output used to be dropped on the floor, which made
-            // diagnosing plugin-side failures guesswork.
-            android.util.Log.d("MyGoPlugin", "[${manifest.id}] ${a.getOrNull(0)}")
+            // diagnosing plugin-side failures guesswork. Keep it in debug builds
+            // only: plugins routinely print cookies/tokens.
+            if (BuildConfig.DEBUG) {
+                android.util.Log.d("MyGoPlugin", "[${manifest.id}] ${a.getOrNull(0)}")
+            }
             null
         }
         engine.function("_storageGet") { a -> synchronized(storage) { storage[a[0] as String] } }
@@ -328,10 +363,15 @@ class PluginRuntime(
         engine.asyncFunction("_delayInternal") { a ->
             val millis = (a[0] as Number).toLong()
             val id = (a[1] as Number).toLong()
-            coroutineScope {
-                val job = async { delay(millis) }
-                delays[id] = job
-                job.await()
+            try {
+                coroutineScope {
+                    val job = async { delay(millis) }
+                    delays[id] = job
+                    job.await()
+                }
+            } finally {
+                // C8: a normally-completed timer must not leak in the map.
+                delays.remove(id)
             }
         }
         engine.asyncFunction("_httpInternal") { a ->
@@ -423,7 +463,14 @@ class PluginRuntime(
                     pendingCalls.remove(id)
                     continue
                 }
-                throw evaluateError ?: e
+                // A timeout is NOT coroutine cancellation: callers deliberately
+                // rethrow CancellationException (plugin switch / screen exit), so
+                // leaking TimeoutCancellationException left the UI stuck on
+                // Load.Loading and silently aborted playback resolves. Surface it
+                // as an ordinary plugin error instead. A genuine parent cancel is
+                // not a TimeoutCancellationException and still propagates.
+                throw evaluateError
+                    ?: PluginCallException(null, "插件调用超时（${timeoutMs / 1000} 秒）")
             } finally {
                 pendingCalls.remove(id)
             }
