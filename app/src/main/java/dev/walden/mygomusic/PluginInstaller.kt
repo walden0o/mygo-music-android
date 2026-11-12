@@ -11,6 +11,8 @@ import kotlinx.serialization.json.put
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
 import java.io.File
 import java.io.IOException
 import java.util.UUID
@@ -65,7 +67,7 @@ object PluginInstaller {
 
     suspend fun fromZipUri(context: Context, uri: Uri): PluginPackage = withContext(Dispatchers.IO) {
         val bytes = context.contentResolver.openInputStream(uri)?.use {
-            it.readNBytes((MAX_ZIP_BYTES + 1).toInt())
+            readLimited(it, MAX_ZIP_BYTES)
         } ?: throw IOException("无法读取所选文件")
         if (bytes.size.toLong() > MAX_ZIP_BYTES) throw IOException("插件包过大")
         val label = uri.lastPathSegment ?: "zip"
@@ -151,12 +153,26 @@ object PluginInstaller {
             if (!res.isSuccessful) throw IOException("下载失败：HTTP " + res.code)
             res.body?.let { body ->
                 if (body.contentLength() > maxBytes) throw IOException("插件包过大")
-                val bytes = body.byteStream().use { it.readNBytes((maxBytes + 1).toInt()) }
+                val bytes = body.byteStream().use { readLimited(it, maxBytes) }
                 if (bytes.size.toLong() > maxBytes) throw IOException("插件包过大")
                 return bytes
             }
         }
         throw IOException("空响应")
+    }
+
+    private fun readLimited(input: InputStream, maxBytes: Long): ByteArray {
+        val limit = (maxBytes + 1).toInt()
+        val out = ByteArrayOutputStream()
+        val buf = ByteArray(8192)
+        var remaining = limit
+        while (remaining > 0) {
+            val read = input.read(buf, 0, minOf(buf.size, remaining))
+            if (read < 0) break
+            out.write(buf, 0, read)
+            remaining -= read
+        }
+        return out.toByteArray()
     }
 
     private fun downloadGitHubZip(repo: String): ByteArray {
