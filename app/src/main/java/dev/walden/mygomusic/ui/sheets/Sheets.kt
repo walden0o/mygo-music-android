@@ -28,6 +28,7 @@ import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -45,6 +46,8 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -88,68 +91,195 @@ fun PluginsSheet(state: MyGoState) {
     // still speaks the current API. Disambiguate colliding names with the id so
     // the user can actually tell the rows apart.
     val duplicated = state.catalog.groupBy { it.name }.filterValues { it.size > 1 }.keys
+    var showInstall by remember { mutableStateOf(false) }
+    var installInput by remember { mutableStateOf("") }
+    var uninstallTarget by remember { mutableStateOf<PluginManifest?>(null) }
+    val zipPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { state.installPluginFromZip(it) }
+    }
     Column(Modifier.fillMaxWidth()) {
-        SheetTitle("插件", "已安装 ${state.catalog.size} 个 · 点选切换音源")
+        SheetTitle("插件", "共 " + state.catalog.size + " 个 · 点选切换音源")
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 24.dp),
+            horizontalArrangement = Arrangement.End,
+        ) {
+            TextButton(onClick = { showInstall = true }, enabled = !state.pluginBusy) {
+                Text("安装插件")
+            }
+        }
         LazyColumn(Modifier.heightIn(max = 520.dp)) {
             items(state.catalog, key = { it.id }) { plugin ->
                 val active = state.manifest?.id == plugin.id
+                val installed = plugin.dir != null
                 val displayName =
-                    if (plugin.name in duplicated) "${plugin.name} · ${plugin.id}" else plugin.name
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .clickable {
-                            state.activate(plugin)
-                        }
-                        .padding(horizontal = 20.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Box(
+                    if (plugin.name in duplicated) plugin.name + " · " + plugin.id else plugin.name
+                Column {
+                    Row(
                         Modifier
-                            .size(40.dp)
-                            .clip(RoundedCornerShape(11.dp))
-                            .background(
-                                if (active) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
-                                else MaterialTheme.colorScheme.surfaceContainerHigh
-                            ),
-                        contentAlignment = Alignment.Center,
+                            .fillMaxWidth()
+                            .clickable { state.activate(plugin) }
+                            .padding(horizontal = 20.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text(
-                            plugin.name.take(1),
-                            style = MaterialTheme.typography.titleMedium,
-                            color = if (active) MaterialTheme.colorScheme.primary
-                            else MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    Spacer(Modifier.width(14.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            displayName,
-                            style = MaterialTheme.typography.bodyLarge,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        val note = buildString {
-                            append("v${plugin.version.ifBlank { "—" }}")
-                            if (plugin.partial) append(" · 部分功能受限")
+                        Box(
+                            Modifier
+                                .size(40.dp)
+                                .clip(RoundedCornerShape(11.dp))
+                                .background(
+                                    if (active) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
+                                    else MaterialTheme.colorScheme.surfaceContainerHigh
+                                ),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                plugin.name.take(1),
+                                style = MaterialTheme.typography.titleMedium,
+                                color = if (active) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
-                        Text(
-                            note,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+                        Spacer(Modifier.width(14.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                displayName,
+                                style = MaterialTheme.typography.bodyLarge,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            val note = buildString {
+                                append("v" + plugin.version.ifBlank { "—" })
+                                if (installed) append(" · 已安装")
+                                plugin.origin?.type?.let { append(" · " + it) }
+                                if (plugin.partial) append(" · 部分功能受限")
+                            }
+                            Text(
+                                note,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        if (active) {
+                            Icon(
+                                Icons.Rounded.Check,
+                                contentDescription = "使用中",
+                                tint = MaterialTheme.colorScheme.primary,
+                            )
+                        }
                     }
-                    if (active) {
-                        Icon(
-                            Icons.Rounded.Check,
-                            contentDescription = "使用中",
-                            tint = MaterialTheme.colorScheme.primary,
-                        )
+                    if (installed) {
+                        Row(
+                            Modifier.padding(start = 74.dp, end = 20.dp, bottom = 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            if (plugin.origin?.type == "github") {
+                                TextButton(
+                                    onClick = { state.updatePlugin(plugin) },
+                                    enabled = !state.pluginBusy,
+                                ) { Text("更新") }
+                            }
+                            TextButton(
+                                onClick = { uninstallTarget = plugin },
+                                enabled = !state.pluginBusy,
+                            ) { Text("卸载") }
+                        }
                     }
                 }
             }
             item { Spacer(Modifier.height(20.dp)) }
         }
+    }
+
+    if (showInstall) {
+        AlertDialog(
+            onDismissRequest = { showInstall = false },
+            title = { Text("安装插件") },
+            text = {
+                Column {
+                    Text("支持 GitHub 仓库/地址，或本地 zip 插件包。")
+                    Spacer(Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = installInput,
+                        onValueChange = { installInput = it },
+                        singleLine = true,
+                        enabled = !state.pluginBusy,
+                        placeholder = { Text("owner/repo 或 GitHub 地址") },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    if (state.pluginBusy) {
+                        Spacer(Modifier.height(8.dp))
+                        Text("正在下载/解析…", style = MaterialTheme.typography.bodySmall)
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    TextButton(
+                        onClick = {
+                            showInstall = false
+                            zipPicker.launch(arrayOf("*/*"))
+                        },
+                        enabled = !state.pluginBusy,
+                    ) { Text("从 zip 安装") }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        state.installPluginFromGitHub(installInput)
+                        showInstall = false
+                    },
+                    enabled = installInput.isNotBlank() && !state.pluginBusy,
+                ) { Text("安装") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showInstall = false }) { Text("取消") }
+            },
+        )
+    }
+
+    state.pendingInstall?.let { pending ->
+        val m = pending.pkg.manifest
+        AlertDialog(
+            onDismissRequest = { state.cancelPluginInstall() },
+            title = { Text(if (pending.replacing) "更新插件" else "安装插件") },
+            text = {
+                Column {
+                    Text(m.name + if (m.version.isBlank()) "" else " v" + m.version)
+                    val originText = m.origin?.repo ?: m.origin?.label
+                    if (!originText.isNullOrBlank()) Text("来源：" + originText)
+                    if (m.networkHosts.isNotEmpty()) Text("网络权限：" + m.networkHosts.joinToString(", "))
+                    if (m.processPrograms.isNotEmpty()) {
+                        Text("进程权限：" + m.processPrograms.joinToString(", "))
+                        Text("Android 端不支持 host.spawn，相关功能可能受限。")
+                    }
+                    if (m.playback != "stream") Text("播放方式：" + m.playback + "（部分功能受限）")
+                    if (m.partialReasons.isNotEmpty()) Text("受限：" + m.partialReasons.joinToString("、"))
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = { state.confirmPluginInstall() },
+                    enabled = !state.pluginBusy,
+                ) { Text(if (pending.replacing) "更新" else "安装") }
+            },
+            dismissButton = {
+                TextButton(onClick = { state.cancelPluginInstall() }) { Text("取消") }
+            },
+        )
+    }
+
+    uninstallTarget?.let { target ->
+        AlertDialog(
+            onDismissRequest = { uninstallTarget = null },
+            title = { Text("卸载插件") },
+            text = { Text("卸载 " + target.name + "？插件数据会保留。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    state.uninstallPlugin(target)
+                    uninstallTarget = null
+                }) { Text("卸载") }
+            },
+            dismissButton = {
+                TextButton(onClick = { uninstallTarget = null }) { Text("取消") }
+            },
+        )
     }
 }
 

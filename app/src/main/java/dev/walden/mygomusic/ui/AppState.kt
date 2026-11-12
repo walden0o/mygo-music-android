@@ -1,6 +1,7 @@
 package dev.walden.mygomusic.ui
 
 import android.content.Context
+import android.net.Uri
 import android.graphics.Bitmap
 import android.os.Handler
 import android.os.Looper
@@ -16,7 +17,9 @@ import dev.walden.mygomusic.ArtistPageResult
 import dev.walden.mygomusic.BrowsePage
 import dev.walden.mygomusic.LinkItem
 import dev.walden.mygomusic.Lyrics
+import dev.walden.mygomusic.PendingPluginInstall
 import dev.walden.mygomusic.Player
+import dev.walden.mygomusic.PluginInstaller
 import dev.walden.mygomusic.Playlist
 import dev.walden.mygomusic.Section
 import dev.walden.mygomusic.PluginCallException
@@ -38,6 +41,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.io.File
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.DeserializationStrategy
 import kotlinx.serialization.SerializationException
@@ -247,6 +251,10 @@ class MyGoState private constructor(private val app: Context) {
         private set
     var pluginError by mutableStateOf<String?>(null)
         private set
+    var pluginBusy by mutableStateOf(false)
+        private set
+    var pendingInstall by mutableStateOf<PendingPluginInstall?>(null)
+        private set
     var account by mutableStateOf<Account?>(null)
         private set
 
@@ -336,7 +344,7 @@ class MyGoState private constructor(private val app: Context) {
         // partial support must not run on the main thread during onCreate.
         scope.launch {
             catalog = withContext(Dispatchers.IO) {
-                PluginCatalog.listBundled(app).sortedBy { preferredRank(it.id) }
+                PluginCatalog.list(app).sortedBy { preferredRank(it.id) }
             }
             // One-time migration: earlier builds defaulted to `netease-music`, whose
             // search/lyrics endpoints are retired. Users never chose it deliberately,
@@ -364,8 +372,8 @@ class MyGoState private constructor(private val app: Context) {
 
     // -- plugin lifecycle -------------------------------------------------
 
-    fun activate(plugin: PluginManifest) {
-        if (manifest?.id == plugin.id && runtime != null) {
+    fun activate(plugin: PluginManifest, force: Boolean = false) {
+        if (!force && manifest?.id == plugin.id && runtime != null) {
             sheet = null
             return
         }
@@ -412,18 +420,29 @@ class MyGoState private constructor(private val app: Context) {
             var rt: PluginRuntime? = null
             try {
                 val source = withContext(Dispatchers.IO) {
-                    val code = try {
-                        app.assets.open("plugins/${plugin.id}/${plugin.main}").bufferedReader().readText()
-                    } catch (e: Exception) {
-                        throw IllegalStateException("插件文件缺失：${e.message}")
+                    val codeDir = plugin.dir
+                    if (codeDir != null) {
+                        val code = File(codeDir, plugin.main).readText()
+                        val locales = runCatching {
+                            File(codeDir, "locales/zh-CN.json").readText()
+                                .let { pluginJson.parseToJsonElement(it).jsonObject }
+                                .mapValues { it.value.jsonPrimitive.content }
+                        }.getOrDefault(emptyMap())
+                        code to locales
+                    } else {
+                        val code = try {
+                            app.assets.open("plugins/" + plugin.id + "/" + plugin.main).bufferedReader().readText()
+                        } catch (e: Exception) {
+                            throw IllegalStateException("插件文件缺失：" + e.message)
+                        }
+                        val locales = runCatching {
+                            val text = app.assets.open("plugins/" + plugin.id + "/locales/zh-CN.json")
+                                .bufferedReader().readText()
+                            pluginJson.parseToJsonElement(text).jsonObject
+                                .mapValues { it.value.jsonPrimitive.content }
+                        }.getOrDefault(emptyMap())
+                        code to locales
                     }
-                    val locales = runCatching {
-                        val text = app.assets.open("plugins/${plugin.id}/locales/zh-CN.json")
-                            .bufferedReader().readText()
-                        pluginJson.parseToJsonElement(text).jsonObject
-                            .mapValues { it.value.jsonPrimitive.content }
-                    }.getOrDefault(emptyMap())
-                    code to locales
                 }
                 val fresh = PluginRuntime(app, plugin, source.first, source.second)
                 rt = fresh
@@ -742,6 +761,156 @@ class MyGoState private constructor(private val app: Context) {
 
     fun openQueue() {
         sheet = Sheet.Queue
+    }
+
+    // -- plugin management -------------------------------------------------
+
+    fun installPluginFromGitHub(input: String) {
+        val text = input.trim()
+        if (text.isEmpty() || pluginBusy) return
+        pluginBusy = true
+        scope.launch {
+            try {
+                val pkg = PluginInstaller.fromGitHub(app, text)
+                val replacing = catalog.any { it.id == pkg.manifest.id && it.dir != null }
+                pendingInstall = PendingPluginInstall(pkg, replacing)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                toast(e.message ?: "安装失败")
+            } finally {
+                pluginBusy = false
+            }
+        }
+    }
+
+    fun installPluginFromZip(uri: Uri) {
+        if (pluginBusy) return
+        pluginBusy = true
+        scope.launch {
+            try {
+                val pkg = PluginInstaller.fromZipUri(app, uri)
+                val replacing = catalog.any { it.id == pkg.manifest.id && it.dir != null }
+                pendingInstall = PendingPluginInstall(pkg, replacing)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                toast(e.message ?: "安装失败")
+            } finally {
+                pluginBusy = false
+            }
+        }
+    }
+
+    fun confirmPluginInstall() {
+        val pending = pendingInstall ?: return
+        if (pluginBusy) return
+        pluginBusy = true
+        scope.launch {
+            try {
+                val installed = withContext(Dispatchers.IO) { PluginInstaller.commit(app, pending.pkg) }
+                pendingInstall = null
+                toast(if (pending.replacing) "已更新 " + installed.name else "已安装 " + installed.name)
+                reloadCatalogAndReactivate(if (manifest?.id == installed.id) installed.id else null)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                toast(e.message ?: "安装失败")
+            } finally {
+                pluginBusy = false
+            }
+        }
+    }
+
+    fun cancelPluginInstall() {
+        val pending = pendingInstall ?: return
+        pendingInstall = null
+        scope.launch {
+            withContext(Dispatchers.IO) { PluginInstaller.discard(pending.pkg) }
+        }
+    }
+
+    fun uninstallPlugin(plugin: PluginManifest) {
+        if (plugin.dir == null) {
+            toast("内置插件不能卸载")
+            return
+        }
+        if (pluginBusy) return
+        pluginBusy = true
+        scope.launch {
+            try {
+                withContext(Dispatchers.IO) { PluginInstaller.uninstall(app, plugin) }
+                toast("已卸载 " + plugin.name + "（数据已保留）")
+                reloadCatalogAndReactivate(if (manifest?.id == plugin.id) plugin.id else null)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                toast(e.message ?: "卸载失败")
+            } finally {
+                pluginBusy = false
+            }
+        }
+    }
+
+    fun updatePlugin(plugin: PluginManifest) {
+        val repo = plugin.origin?.repo
+        if (plugin.dir == null || plugin.origin?.type != "github" || repo.isNullOrBlank()) {
+            toast("该插件不支持在线更新")
+            return
+        }
+        if (pluginBusy) return
+        pluginBusy = true
+        scope.launch {
+            try {
+                val pkg = PluginInstaller.fromGitHub(app, repo)
+                val latest = pkg.manifest
+                val permissionsChanged = latest.networkHosts.toSet() != plugin.networkHosts.toSet() ||
+                    latest.processPrograms.toSet() != plugin.processPrograms.toSet()
+                val newer = PluginInstaller.isNewer(latest.version, plugin.version) || permissionsChanged
+                if (!newer) {
+                    withContext(Dispatchers.IO) { PluginInstaller.discard(pkg) }
+                    toast(plugin.name + " 已是最新")
+                } else {
+                    pendingInstall = PendingPluginInstall(pkg, replacing = true)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                toast(e.message ?: "检查更新失败")
+            } finally {
+                pluginBusy = false
+            }
+        }
+    }
+
+    private fun reloadCatalogAndReactivate(affectedId: String?) {
+        scope.launch {
+            val list = withContext(Dispatchers.IO) { PluginCatalog.list(app) }
+                .sortedBy { preferredRank(it.id) }
+            catalog = list
+            val current = manifest
+            val targetId = affectedId ?: current?.id ?: return@launch
+            val found = list.firstOrNull { it.id == targetId }
+            if (found != null) {
+                val changed = current == null || current.id != found.id ||
+                    current.version != found.version || current.dir != found.dir ||
+                    current.origin != found.origin
+                if (changed) activate(found, force = true)
+            } else {
+                val first = list.firstOrNull()
+                if (first != null) {
+                    activate(first)
+                } else {
+                    runtime?.close()
+                    runtime = null
+                    Player.runtime = null
+                    Player.reset()
+                    manifest = null
+                    pluginReady = false
+                    pluginError = "没有可用的插件"
+                }
+            }
+        }
     }
 
     // -- home / browse ----------------------------------------------------

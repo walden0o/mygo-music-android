@@ -74,9 +74,19 @@ data class PluginManifest(
     val navigation: List<NavDef>,
     val partial: Boolean,
     val partialReasons: List<String>,
+    val dir: File? = null,
+    val origin: PluginOrigin? = null,
 )
 
 object PluginCatalog {
+    fun list(context: Context): List<PluginManifest> {
+        val byId = LinkedHashMap<String, PluginManifest>()
+        listBundled(context).forEach { byId[it.id] = it }
+        // Installed plugins shadow bundled ones with the same id.
+        listInstalled(context).forEach { byId[it.id] = it }
+        return byId.values.toList()
+    }
+
     fun listBundled(context: Context): List<PluginManifest> {
         val am = context.assets
         val dirs = am.list("plugins") ?: return emptyList()
@@ -92,66 +102,125 @@ object PluginCatalog {
                 // from a malformed (or future imported) manifest.
                 fun unsafe(s: String) = s.isBlank() || s.contains('/') || s.contains('\\') || s.contains("..")
                 if (unsafe(id) || unsafe(main)) {
-                    android.util.Log.w("MyGoPlugin", "skipping plugin $dir: unsafe id/main ($id / $main)")
+                    android.util.Log.w("MyGoPlugin", "skipping plugin " + dir + ": unsafe id/main (" + id + " / " + main + ")")
                     continue
                 }
                 val source = am.open("plugins/$dir/$main").bufferedReader().readText()
-                val perms = m["permissions"]?.jsonObject
-                val network = (perms?.get("network") as? kotlinx.serialization.json.JsonArray)
-                    ?.map { it.jsonPrimitive.content } ?: emptyList()
-                val process = (perms?.get("process") as? kotlinx.serialization.json.JsonArray)
-                    ?.map { it.jsonPrimitive.content } ?: emptyList()
-                val settings = (m["settings"] as? kotlinx.serialization.json.JsonArray)?.map { s ->
-                    val o = s.jsonObject
-                    val options = (o["options"] as? kotlinx.serialization.json.JsonArray)?.map { op ->
-                        val oo = op.jsonObject
-                        (oo["value"]?.jsonPrimitive?.content ?: "") to (oo["label"]?.jsonPrimitive?.content ?: "")
-                    } ?: emptyList()
-                    SettingDef(
-                        key = o["key"]?.jsonPrimitive?.content ?: "",
-                        label = o["label"]?.jsonPrimitive?.content ?: "",
-                        help = o["help"]?.jsonPrimitive?.content,
-                        type = o["type"]?.jsonPrimitive?.content,
-                        options = options,
-                        link = o["link"]?.jsonPrimitive?.content,
-                    )
-                } ?: emptyList()
-                val navigation = (m["navigation"] as? kotlinx.serialization.json.JsonArray)?.map { n ->
-                    val o = n.jsonObject
-                    NavDef(
-                        builtin = o["builtin"]?.jsonPrimitive?.content,
-                        page = o["page"]?.jsonPrimitive?.content,
-                        title = o["title"]?.jsonPrimitive?.content,
-                        icon = o["icon"]?.jsonPrimitive?.content,
-                    )
-                } ?: emptyList()
-                val playback = m["playback"]?.jsonPrimitive?.content ?: "stream"
-                val reasons = mutableListOf<String>()
-                if (playback != "stream") reasons += "remote playback"
-                if (process.isNotEmpty()) reasons += "needs helper programs"
-                if (source.contains("host.webSignIn")) reasons += "web sign-in"
-                if (source.contains("host.waitForRedirect")) reasons += "browser sign-in"
-                out += PluginManifest(
-                    id = id,
-                    name = m["name"]?.jsonPrimitive?.content ?: dir,
-                    version = m["version"]?.jsonPrimitive?.content ?: "",
-                    main = main,
-                    playback = playback,
-                    networkHosts = network,
-                    processPrograms = process,
-                    settings = settings,
-                    navigation = navigation,
-                    partial = reasons.isNotEmpty(),
-                    partialReasons = reasons,
-                )
+                out += parseManifest(dir, text, source, null, null)
             } catch (e: Exception) {
                 // A malformed bundled plugin is skipped, never fatal — but log it
                 // so a broken plugin does not vanish silently.
-                android.util.Log.w("MyGoPlugin", "skipping malformed plugin $dir: ${e.message}")
+                android.util.Log.w("MyGoPlugin", "skipping malformed plugin " + dir + ": " + e.message)
             }
         }
         return out
     }
+
+    fun listInstalled(context: Context): List<PluginManifest> {
+        val root = File(context.filesDir, "plugin-code")
+        val dirs = root.listFiles()?.filter { it.isDirectory }?.sortedBy { it.name } ?: return emptyList()
+        val out = mutableListOf<PluginManifest>()
+        for (dir in dirs) {
+            try {
+                val manifestFile = File(dir, "plugin.json")
+                if (!manifestFile.isFile) continue
+                val text = manifestFile.readText()
+                val m = pluginJson.parseToJsonElement(text).jsonObject
+                val main = m["main"]?.jsonPrimitive?.content ?: "index.js"
+                val id = m["id"]?.jsonPrimitive?.content ?: dir.name
+                fun unsafe(s: String) = s.isBlank() || s.contains('/') || s.contains('\\') || s.contains("..")
+                if (unsafe(id) || unsafe(main)) {
+                    android.util.Log.w("MyGoPlugin", "skipping installed plugin " + dir.name + ": unsafe id/main (" + id + " / " + main + ")")
+                    continue
+                }
+                val sourceFile = File(dir, main)
+                if (!sourceFile.isFile) throw IllegalStateException("入口文件缺失：" + main)
+                val source = sourceFile.readText()
+                out += parseManifest(dir.name, text, source, dir, readOrigin(dir))
+            } catch (e: Exception) {
+                android.util.Log.w("MyGoPlugin", "skipping malformed installed plugin " + dir.name + ": " + e.message)
+            }
+        }
+        return out
+    }
+
+    fun parseManifest(
+        dirName: String,
+        manifestText: String,
+        source: String,
+        dir: File?,
+        origin: PluginOrigin?,
+    ): PluginManifest {
+        val m = pluginJson.parseToJsonElement(manifestText).jsonObject
+        val main = m["main"]?.jsonPrimitive?.content ?: "index.js"
+        val id = m["id"]?.jsonPrimitive?.content ?: dirName
+        fun unsafe(s: String) = s.isBlank() || s.contains('/') || s.contains('\\') || s.contains("..")
+        if (unsafe(id) || unsafe(main)) throw IllegalArgumentException("unsafe plugin id/main: " + id + " / " + main)
+        val perms = m["permissions"]?.jsonObject
+        val network = (perms?.get("network") as? kotlinx.serialization.json.JsonArray)
+            ?.map { it.jsonPrimitive.content } ?: emptyList()
+        val process = (perms?.get("process") as? kotlinx.serialization.json.JsonArray)
+            ?.map { it.jsonPrimitive.content } ?: emptyList()
+        val settings = (m["settings"] as? kotlinx.serialization.json.JsonArray)?.map { s ->
+            val o = s.jsonObject
+            val options = (o["options"] as? kotlinx.serialization.json.JsonArray)?.map { op ->
+                val oo = op.jsonObject
+                (oo["value"]?.jsonPrimitive?.content ?: "") to (oo["label"]?.jsonPrimitive?.content ?: "")
+            } ?: emptyList()
+            SettingDef(
+                key = o["key"]?.jsonPrimitive?.content ?: "",
+                label = o["label"]?.jsonPrimitive?.content ?: "",
+                help = o["help"]?.jsonPrimitive?.content,
+                type = o["type"]?.jsonPrimitive?.content,
+                options = options,
+                link = o["link"]?.jsonPrimitive?.content,
+            )
+        } ?: emptyList()
+        val navigation = (m["navigation"] as? kotlinx.serialization.json.JsonArray)?.map { n ->
+            val o = n.jsonObject
+            NavDef(
+                builtin = o["builtin"]?.jsonPrimitive?.content,
+                page = o["page"]?.jsonPrimitive?.content,
+                title = o["title"]?.jsonPrimitive?.content,
+                icon = o["icon"]?.jsonPrimitive?.content,
+            )
+        } ?: emptyList()
+        val playback = m["playback"]?.jsonPrimitive?.content ?: "stream"
+        val reasons = mutableListOf<String>()
+        if (playback != "stream") reasons += "remote playback"
+        if (process.isNotEmpty()) reasons += "needs helper programs"
+        if (source.contains("host.webSignIn")) reasons += "web sign-in"
+        if (source.contains("host.waitForRedirect")) reasons += "browser sign-in"
+        return PluginManifest(
+            id = id,
+            name = m["name"]?.jsonPrimitive?.content ?: dirName,
+            version = m["version"]?.jsonPrimitive?.content ?: "",
+            main = main,
+            playback = playback,
+            networkHosts = network,
+            processPrograms = process,
+            settings = settings,
+            navigation = navigation,
+            partial = reasons.isNotEmpty(),
+            partialReasons = reasons,
+            dir = dir,
+            origin = origin,
+        )
+    }
+
+    private fun readOrigin(dir: File): PluginOrigin? = runCatching {
+        val f = File(dir, ".origin.json")
+        if (!f.isFile) return null
+        val o = pluginJson.parseToJsonElement(f.readText()).jsonObject
+        val type = o["type"]?.jsonPrimitive?.content ?: return null
+        PluginOrigin(
+            type = type,
+            repo = o["repo"]?.jsonPrimitive?.content,
+            ref = o["ref"]?.jsonPrimitive?.content,
+            version = o["version"]?.jsonPrimitive?.content,
+            label = o["label"]?.jsonPrimitive?.content,
+        )
+    }.getOrNull()
 }
 
 private fun md5Hex(text: String): String =
@@ -380,7 +449,7 @@ class PluginRuntime(
         val prelude = context.assets.open("prelude.js").bufferedReader().readText()
         engine.evaluate<Any?>(prelude, "prelude.js")
         engine.evaluate<Any?>(
-            "host.dir = ${jsStr(dataDir.absolutePath)}; host.dataDir = ${jsStr(dataDir.absolutePath)};",
+            "host.dir = ${jsStr((manifest.dir ?: dataDir).absolutePath)}; host.dataDir = ${jsStr(dataDir.absolutePath)};",
             "dirs.js",
         )
         engine.addModule("plugin-entry", sourceCode)
